@@ -12,7 +12,7 @@ function App() {
         <Nav
           logo={
             <NavLink to="/" className="bf-neutral-link">
-              <Nav.Logo logo={logo}>Operations Assistant</Nav.Logo>
+              <Nav.Logo logo={logo}>Operations Assistant Insight</Nav.Logo>
             </NavLink>
           }
           side={
