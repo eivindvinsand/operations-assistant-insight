@@ -18,9 +18,9 @@
     "@intility/bifrost-css": "^6.12.0",
     "@intility/bifrost-react": "^6.20.0",
     "express": "^5.2.1",
+    "marked": "^18.0.11",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "react-markdown": "^10.1.0",
     "react-router": "^8.3.1",
     "recharts": "^3.10.1"
   },

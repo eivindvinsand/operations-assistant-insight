@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
+import { marked } from 'marked'
 import {
   Bar,
   BarChart,
@@ -72,6 +72,10 @@ function formatDuration(seconds: number): string {
   return `${minutes}m ${rest}s`
 }
 
+function Markdown({ text }: { text: string }) {
+  return <div className="bf-elements" dangerouslySetInnerHTML={{ __html: marked.parse(text, { async: false }) }} />
+}
+
 function StatTile({
   icon,
   label,
@@ -141,11 +145,7 @@ function StepOutput({ step }: { step: RunStep }) {
     )
   }
   if (step.type === 'agent' || step.type === 'chat') {
-    return (
-      <div className="bf-elements">
-        <ReactMarkdown>{step.output}</ReactMarkdown>
-      </div>
-    )
+    return <Markdown text={step.output} />
   }
   return <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{step.output}</p>
 }
@@ -170,9 +170,7 @@ function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
               <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
                 Solution proposal
               </small>
-              <div className="bf-elements">
-                <ReactMarkdown>{run.solution}</ReactMarkdown>
-              </div>
+              <Markdown text={run.solution} />
             </Box>
           )}
 
