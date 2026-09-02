@@ -82,6 +82,15 @@ const preciseCostFormatter = new Intl.NumberFormat('en-US', {
 
 const dayFormatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: '2-digit' })
 
+const tooltipContentStyle = {
+  background: 'var(--bfc-base-3)',
+  border: '1px solid var(--bfc-base-c-dimmed)',
+  borderRadius: 8,
+  color: 'var(--bfc-base-c)',
+}
+const tooltipItemStyle = { color: 'var(--bfc-base-c)' }
+const tooltipLabelStyle = { color: 'var(--bfc-base-c-2)' }
+
 function formatDuration(seconds: number): string {
   if (!seconds) return '0s'
   if (seconds < 60) return `${Math.round(seconds)}s`
@@ -329,7 +338,7 @@ function Dashboard() {
                     allowDecimals={false}
                     tick={{ fill: 'var(--bfc-base-c-2)' }}
                   />
-                  <Tooltip cursor={false} />
+                  <Tooltip cursor={false} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
                   <Bar dataKey="count" name="Events" fill="var(--bfc-chill)" radius={4} />
                 </BarChart>
               </ResponsiveContainer>
@@ -358,7 +367,7 @@ function Dashboard() {
                     tick={{ fill: 'var(--bfc-base-c-2)' }}
                     tickFormatter={(v) => costFormatter.format(v)}
                   />
-                  <Tooltip cursor={false} formatter={(v) => costFormatter.format(Number(v))} />
+                  <Tooltip cursor={false} formatter={(v) => costFormatter.format(Number(v))} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
                   <Legend wrapperStyle={{ fontSize: 12 }} />
                   <Bar dataKey="cost" name="Daily cost" fill="var(--bfc-chill)" radius={4} />
                   <Line
@@ -400,7 +409,7 @@ function Dashboard() {
                       width={160}
                       tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 12 }}
                     />
-                    <Tooltip cursor={false} formatter={(v) => costFormatter.format(Number(v))} />
+                    <Tooltip cursor={false} formatter={(v) => costFormatter.format(Number(v))} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
                     <Bar dataKey="costUsd" name="Cost" fill="var(--bfc-chill)" radius={4} />
                   </BarChart>
                 </ResponsiveContainer>
@@ -425,7 +434,7 @@ function Dashboard() {
                       width={220}
                       tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 12 }}
                     />
-                    <Tooltip cursor={false} />
+                    <Tooltip cursor={false} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
                     <Bar dataKey="count" name="Calls" fill="var(--bfc-chill)" radius={4} />
                   </BarChart>
                 </ResponsiveContainer>
@@ -450,7 +459,7 @@ function Dashboard() {
                       width={160}
                       tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 12 }}
                     />
-                    <Tooltip cursor={false} />
+                    <Tooltip cursor={false} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
                     <Bar dataKey="inputTokens" name="Input" stackId="tokens" fill="var(--bfc-chill)" radius={0} />
                     <Bar dataKey="outputTokens" name="Output" stackId="tokens" fill="var(--bfc-attn)" radius={[0, 4, 4, 0]} />
