@@ -115,7 +115,7 @@ app.get("/api/dashboard", async (_req, res) => {
         activity,
       ),
       logfireQuery(
-        "SELECT sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT)) as input_tokens, sum(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as output_tokens FROM records WHERE span_name = 'agent run'",
+        "SELECT sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT)) as input_tokens, sum(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd FROM records WHERE span_name = 'agent run'",
         insights,
       ),
       logfireQuery(
@@ -123,7 +123,7 @@ app.get("/api/dashboard", async (_req, res) => {
         insights,
       ),
       logfireQuery(
-        "SELECT attributes->>'model_name' as model, sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT)) as input_tokens, sum(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as output_tokens, count(*) as calls FROM records WHERE span_name = 'agent run' GROUP BY 1 ORDER BY calls DESC LIMIT 8",
+        "SELECT attributes->>'model_name' as model, sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT)) as input_tokens, sum(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd, count(*) as calls FROM records WHERE span_name = 'agent run' GROUP BY 1 ORDER BY calls DESC LIMIT 8",
         insights,
       ),
       logfireQuery(
@@ -165,7 +165,7 @@ app.get("/api/dashboard", async (_req, res) => {
     }
 
     const totalsRow = totalsResult.data[0] ?? { events: 0, errors: 0 }
-    const tokensRow = tokensResult.data[0] ?? { input_tokens: 0, output_tokens: 0 }
+    const tokensRow = tokensResult.data[0] ?? { input_tokens: 0, output_tokens: 0, cost_usd: 0 }
     const solutionRow = solutionTotalsResult.data[0] ?? { runs: 0, tickets: 0, avg_duration: 0 }
 
     res.json({
@@ -174,6 +174,7 @@ app.get("/api/dashboard", async (_req, res) => {
         errors: Number(totalsRow.errors ?? 0),
         inputTokens: Number(tokensRow.input_tokens ?? 0),
         outputTokens: Number(tokensRow.output_tokens ?? 0),
+        costUsd: Number(tokensRow.cost_usd ?? 0),
         solutionAgentRuns: Number(solutionRow.runs ?? 0),
         solutionAgentTickets: Number(solutionRow.tickets ?? 0),
         solutionAgentAvgDurationSec: Number(solutionRow.avg_duration ?? 0),
@@ -191,6 +192,7 @@ app.get("/api/dashboard", async (_req, res) => {
           model: row.model,
           inputTokens: Number(row.input_tokens ?? 0),
           outputTokens: Number(row.output_tokens ?? 0),
+          costUsd: row.cost_usd != null ? Number(row.cost_usd) : null,
           calls: Number(row.calls ?? 0),
         })),
       tickets: grouped.map((t) => ({

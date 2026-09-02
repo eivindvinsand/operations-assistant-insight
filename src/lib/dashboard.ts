@@ -25,13 +25,20 @@ export interface DashboardData {
     errors: number
     inputTokens: number
     outputTokens: number
+    costUsd: number
     solutionAgentRuns: number
     solutionAgentTickets: number
     solutionAgentAvgDurationSec: number
   }
   timeline: { hour: string; count: number }[]
   tools: { tool: string; count: number }[]
-  models: { model: string; inputTokens: number; outputTokens: number; calls: number }[]
+  models: {
+    model: string
+    inputTokens: number
+    outputTokens: number
+    costUsd: number | null
+    calls: number
+  }[]
   tickets: {
     ticket: string
     triggers: number

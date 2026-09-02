@@ -19,6 +19,7 @@ import {
   faCoins,
   faComments,
   faFlagCheckered,
+  faSackDollar,
   faTicket,
   faTriangleExclamation,
   faWandMagicSparkles,
@@ -63,6 +64,13 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
 })
 
 const compactFormatter = new Intl.NumberFormat('en-US', { notation: 'compact' })
+
+const costFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  notation: 'compact',
+  maximumFractionDigits: 2,
+})
 
 function formatDuration(seconds: number): string {
   if (!seconds) return '0s'
@@ -216,6 +224,9 @@ function Dashboard() {
 
   const toolData = data?.tools ?? []
   const modelData = data?.models ?? []
+  const costData = (data?.models ?? [])
+    .filter((m) => m.costUsd != null)
+    .sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0))
 
   return (
     <div className="bf-page-padding">
@@ -245,7 +256,7 @@ function Dashboard() {
 
       {data && (
         <Grid gap={24}>
-          <Grid cols={1} small={2} large={3} xl={6} gap={16}>
+          <Grid cols={1} small={2} large={3} xl={4} gap={16}>
             <StatTile icon={faBolt} label="Events (24h)" value={compactFormatter.format(data.totals.events)} />
             <StatTile icon={faTriangleExclamation} label="Errors (24h)" value={compactFormatter.format(data.totals.errors)} />
             <StatTile
@@ -262,6 +273,11 @@ function Dashboard() {
               icon={faCoins}
               label="Tokens used (7d)"
               value={compactFormatter.format(data.totals.inputTokens + data.totals.outputTokens)}
+            />
+            <StatTile
+              icon={faSackDollar}
+              label="LLM cost (7d)"
+              value={costFormatter.format(data.totals.costUsd)}
             />
             <StatTile
               icon={faClock}
@@ -303,7 +319,39 @@ function Dashboard() {
             )}
           </SectionBox>
 
-          <Grid cols={1} large={2} gap={24}>
+          <Grid cols={1} large={2} xl={3} gap={24}>
+            <SectionBox title="Estimated LLM cost per model (7d)">
+              {costData.length === 0 ? (
+                <Message state="neutral" noIcon>
+                  Logfire has no pricing data for the models used yet (self-hosted/internal
+                  models often aren't in its pricing table).
+                </Message>
+              ) : (
+                <ResponsiveContainer width="100%" height={Math.max(240, costData.length * 32)}>
+                  <BarChart data={costData} layout="vertical" margin={{ left: 20 }}>
+                    <CartesianGrid strokeDasharray="5 5" horizontal={false} stroke="var(--bfc-base-c-dimmed)" />
+                    <XAxis
+                      type="number"
+                      axisLine={false}
+                      tickLine={false}
+                      tick={{ fill: 'var(--bfc-base-c-2)' }}
+                      tickFormatter={(v) => costFormatter.format(v)}
+                    />
+                    <YAxis
+                      type="category"
+                      dataKey="model"
+                      axisLine={false}
+                      tickLine={false}
+                      width={160}
+                      tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 12 }}
+                    />
+                    <Tooltip cursor={false} formatter={(v) => costFormatter.format(Number(v))} />
+                    <Bar dataKey="costUsd" name="Cost" fill="var(--bfc-chill)" radius={4} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </SectionBox>
+
             <SectionBox title="Most used tools (7d)">
               {toolData.length === 0 ? (
                 <Message state="neutral" noIcon>
