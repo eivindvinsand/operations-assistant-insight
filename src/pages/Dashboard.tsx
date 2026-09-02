@@ -280,16 +280,16 @@ function Dashboard() {
       {data && (
         <Grid gap={24}>
           <Grid cols={1} small={2} large={4} gap={16}>
-            <StatTile icon={faBolt} label="Events (24h)" value={compactFormatter.format(data.totals.events)} />
-            <StatTile icon={faTriangleExclamation} label="Errors (24h)" value={compactFormatter.format(data.totals.errors)} />
+            <StatTile icon={faBolt} label="Events (today)" value={compactFormatter.format(data.totals.events)} />
+            <StatTile icon={faTriangleExclamation} label="Errors (today)" value={compactFormatter.format(data.totals.errors)} />
             <StatTile
               icon={faWandMagicSparkles}
-              label="Solution agent runs (7d)"
+              label="Solution agent runs (today)"
               value={compactFormatter.format(data.totals.solutionAgentRuns)}
             />
             <StatTile
               icon={faTicket}
-              label="Unique tickets triggered (7d)"
+              label="Unique tickets triggered (today)"
               value={compactFormatter.format(data.totals.solutionAgentTickets)}
             />
           </Grid>
@@ -332,7 +332,7 @@ function Dashboard() {
             )}
           </SectionBox>
 
-          <SectionBox title="Events per hour (24h)">
+          <SectionBox title="Events per hour (today)">
             {chartData.length === 0 ? (
               <Message state="neutral" noIcon>
                 No events recorded in Logfire yet.

@@ -24,12 +24,8 @@ export interface DashboardData {
   totals: {
     events: number
     errors: number
-    inputTokens: number
-    outputTokens: number
-    costUsd: number
     solutionAgentRuns: number
     solutionAgentTickets: number
-    solutionAgentAvgDurationSec: number
   }
   timeline: { hour: string; count: number }[]
   tools: { tool: string; count: number }[]

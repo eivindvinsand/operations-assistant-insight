@@ -32,7 +32,7 @@ async function queryOnce(endpoint, sql, minTimestamp, maxTimestamp) {
 }
 
 /** Runs a Logfire SQL query, remembering which regional endpoint answers this token. */
-export async function logfireQuery(sql, { hoursBack = 24 } = {}) {
+export async function logfireQuery(sql, { hoursBack = 24, minTimestamp: minTimestampOverride } = {}) {
   if (!process.env.LOGFIRE_API_KEY) {
     const err = new Error("LOGFIRE_API_KEY is not set")
     err.status = 500
@@ -40,7 +40,7 @@ export async function logfireQuery(sql, { hoursBack = 24 } = {}) {
   }
 
   const maxTimestamp = new Date().toISOString()
-  const minTimestamp = new Date(Date.now() - hoursBack * 60 * 60 * 1000).toISOString()
+  const minTimestamp = minTimestampOverride ?? new Date(Date.now() - hoursBack * 60 * 60 * 1000).toISOString()
 
   const endpoints = workingEndpoint
     ? [workingEndpoint, ...ENDPOINTS.filter((e) => e !== workingEndpoint)]

@@ -96,34 +96,32 @@ function groupRunsByTicket(runRows) {
 
 app.get("/api/dashboard", async (_req, res) => {
   try {
+    const startOfToday = new Date()
+    startOfToday.setUTCHours(0, 0, 0, 0)
+    const today = { minTimestamp: startOfToday.toISOString() }
     const activity = { hoursBack: HOURS_BACK_ACTIVITY }
     const insights = { hoursBack: HOURS_BACK_INSIGHTS }
     const [
       totalsResult,
       timelineResult,
       recentResult,
-      tokensResult,
       toolsResult,
       modelsResult,
-      solutionTotalsResult,
+      todaySolutionResult,
       solutionRunsResult,
       dailyCostResult,
     ] = await Promise.all([
       logfireQuery(
         "SELECT count(*) as events, count(*) FILTER (WHERE level >= 17) as errors FROM records",
-        activity,
+        today,
       ),
       logfireQuery(
         "SELECT date_trunc('hour', start_timestamp) as hour, count(*) as count FROM records GROUP BY 1 ORDER BY 1",
-        activity,
+        today,
       ),
       logfireQuery(
         "SELECT start_timestamp, service_name, level, message FROM records ORDER BY start_timestamp DESC LIMIT 15",
         activity,
-      ),
-      logfireQuery(
-        "SELECT sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT)) as input_tokens, sum(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd FROM records WHERE span_name = 'agent run'",
-        insights,
       ),
       logfireQuery(
         "SELECT attributes->>'gen_ai.tool.name' as tool, count(*) as n FROM records WHERE span_name = 'running tool' GROUP BY 1 ORDER BY n DESC LIMIT 10",
@@ -134,8 +132,8 @@ app.get("/api/dashboard", async (_req, res) => {
         insights,
       ),
       logfireQuery(
-        "SELECT count(*) as runs, count(distinct attributes->>'reference_number') as tickets, avg(CAST(attributes->>'duration_s' AS DOUBLE)) as avg_duration FROM records WHERE span_name = 'solution_agent_finished'",
-        insights,
+        "SELECT count(*) as runs, count(distinct attributes->>'reference_number') as tickets FROM records WHERE span_name = 'solution_agent_finished'",
+        today,
       ),
       logfireQuery(
         "SELECT trace_id, start_timestamp, attributes->>'reference_number' as ticket, attributes->>'outcome' as outcome, CAST(attributes->>'duration_s' AS DOUBLE) as duration_s FROM records WHERE span_name = 'solution_agent_finished' ORDER BY start_timestamp DESC LIMIT 200",
@@ -177,19 +175,14 @@ app.get("/api/dashboard", async (_req, res) => {
     }
 
     const totalsRow = totalsResult.data[0] ?? { events: 0, errors: 0 }
-    const tokensRow = tokensResult.data[0] ?? { input_tokens: 0, output_tokens: 0, cost_usd: 0 }
-    const solutionRow = solutionTotalsResult.data[0] ?? { runs: 0, tickets: 0, avg_duration: 0 }
+    const todaySolutionRow = todaySolutionResult.data[0] ?? { runs: 0, tickets: 0 }
 
     res.json({
       totals: {
         events: Number(totalsRow.events ?? 0),
         errors: Number(totalsRow.errors ?? 0),
-        inputTokens: Number(tokensRow.input_tokens ?? 0),
-        outputTokens: Number(tokensRow.output_tokens ?? 0),
-        costUsd: Number(tokensRow.cost_usd ?? 0),
-        solutionAgentRuns: Number(solutionRow.runs ?? 0),
-        solutionAgentTickets: Number(solutionRow.tickets ?? 0),
-        solutionAgentAvgDurationSec: Number(solutionRow.avg_duration ?? 0),
+        solutionAgentRuns: Number(todaySolutionRow.runs ?? 0),
+        solutionAgentTickets: Number(todaySolutionRow.tickets ?? 0),
       },
       timeline: timelineResult.data.map((row) => ({
         hour: row.hour,
