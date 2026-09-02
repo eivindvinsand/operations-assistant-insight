@@ -96,28 +96,39 @@ function groupRunsByTicket(runRows) {
 
 app.get("/api/dashboard", async (_req, res) => {
   try {
-    const startOfToday = new Date()
-    startOfToday.setUTCHours(0, 0, 0, 0)
-    const today = { minTimestamp: startOfToday.toISOString() }
     const activity = { hoursBack: HOURS_BACK_ACTIVITY }
     const insights = { hoursBack: HOURS_BACK_INSIGHTS }
     const [
-      totalsResult,
+      responseTimeResult,
+      confidenceResult,
+      tokensPerChatResult,
+      contextResult,
       timelineResult,
       recentResult,
       toolsResult,
       modelsResult,
-      todaySolutionResult,
       solutionRunsResult,
       dailyCostResult,
     ] = await Promise.all([
       logfireQuery(
-        "SELECT count(*) as events, count(*) FILTER (WHERE level >= 17) as errors FROM records",
-        today,
+        "SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent'",
+        insights,
+      ),
+      logfireQuery(
+        "SELECT count(distinct trace_id) as total, count(distinct trace_id) FILTER (WHERE attributes->>'final_result' ILIKE '%HØY%') as high FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' ILIKE '%Konfidens%'",
+        insights,
+      ),
+      logfireQuery(
+        "SELECT sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT) + CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as total_tokens, count(distinct attributes->>'gen_ai.agent.call.id') as calls FROM records WHERE span_name = 'agent run'",
+        insights,
+      ),
+      logfireQuery(
+        "SELECT attributes->'context'->>'entity_type' as entity_type, count(*) as n FROM records WHERE span_name = 'chat.request' AND attributes->'context'->>'entity_type' IS NOT NULL GROUP BY 1 ORDER BY n DESC",
+        insights,
       ),
       logfireQuery(
         "SELECT date_trunc('hour', start_timestamp) as hour, count(*) as count FROM records GROUP BY 1 ORDER BY 1",
-        today,
+        insights,
       ),
       logfireQuery(
         "SELECT start_timestamp, service_name, level, message FROM records ORDER BY start_timestamp DESC LIMIT 15",
@@ -130,10 +141,6 @@ app.get("/api/dashboard", async (_req, res) => {
       logfireQuery(
         "SELECT attributes->>'model_name' as model, sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT)) as input_tokens, sum(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd, count(*) as calls FROM records WHERE span_name = 'agent run' GROUP BY 1 ORDER BY calls DESC LIMIT 8",
         insights,
-      ),
-      logfireQuery(
-        "SELECT count(*) as runs, count(distinct attributes->>'reference_number') as tickets FROM records WHERE span_name = 'solution_agent_finished'",
-        today,
       ),
       logfireQuery(
         "SELECT trace_id, start_timestamp, attributes->>'reference_number' as ticket, attributes->>'outcome' as outcome, CAST(attributes->>'duration_s' AS DOUBLE) as duration_s FROM records WHERE span_name = 'solution_agent_finished' ORDER BY start_timestamp DESC LIMIT 200",
@@ -174,16 +181,25 @@ app.get("/api/dashboard", async (_req, res) => {
       }
     }
 
-    const totalsRow = totalsResult.data[0] ?? { events: 0, errors: 0 }
-    const todaySolutionRow = todaySolutionResult.data[0] ?? { runs: 0, tickets: 0 }
+    const responseTimeRow = responseTimeResult.data[0] ?? { median_dur: 0, avg_dur: 0 }
+    const confidenceRow = confidenceResult.data[0] ?? { total: 0, high: 0 }
+    const tokensPerChatRow = tokensPerChatResult.data[0] ?? { total_tokens: 0, calls: 0 }
 
     res.json({
       totals: {
-        events: Number(totalsRow.events ?? 0),
-        errors: Number(totalsRow.errors ?? 0),
-        solutionAgentRuns: Number(todaySolutionRow.runs ?? 0),
-        solutionAgentTickets: Number(todaySolutionRow.tickets ?? 0),
+        medianResponseTimeSec: Number(responseTimeRow.median_dur ?? 0),
+        avgResponseTimeSec: Number(responseTimeRow.avg_dur ?? 0),
+        highConfidencePct:
+          confidenceRow.total > 0 ? (Number(confidenceRow.high) / Number(confidenceRow.total)) * 100 : null,
+        tokensUsed: Number(tokensPerChatRow.total_tokens ?? 0),
+        avgTokensPerChat:
+          tokensPerChatRow.calls > 0
+            ? Number(tokensPerChatRow.total_tokens ?? 0) / Number(tokensPerChatRow.calls)
+            : 0,
       },
+      context: contextResult.data
+        .filter((row) => row.entity_type)
+        .map((row) => ({ type: row.entity_type, count: Number(row.n ?? 0) })),
       timeline: timelineResult.data.map((row) => ({
         hour: row.hour,
         count: Number(row.count ?? 0),

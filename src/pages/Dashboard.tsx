@@ -4,9 +4,13 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Legend,
   Line,
+  LineChart,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -14,14 +18,15 @@ import {
 } from 'recharts'
 import {
   faArrowsRotate,
-  faBolt,
   faBrain,
+  faBullseye,
   faCircleInfo,
+  faCoins,
   faComments,
+  faCommentDots,
   faFlagCheckered,
-  faTicket,
-  faTriangleExclamation,
-  faWandMagicSparkles,
+  faHourglassHalf,
+  faStopwatch,
   faWrench,
 } from '@fortawesome/free-solid-svg-icons'
 import Box from '@intility/bifrost-react/Box'
@@ -87,6 +92,25 @@ const tooltipContentStyle = {
 }
 const tooltipItemStyle = { color: 'var(--bfc-base-c)' }
 const tooltipLabelStyle = { color: 'var(--bfc-base-c-2)' }
+
+const CONTEXT_COLORS: Record<string, string> = {
+  ticket: 'var(--bfc-chill)',
+  incident: 'var(--bfc-attn)',
+  problem: 'var(--bfc-warning)',
+  chat: 'var(--bfc-success)',
+  change: 'var(--bfc-brand)',
+  project: 'var(--bfc-base-c-2)',
+}
+const FALLBACK_CONTEXT_COLORS = [
+  'var(--bfc-chill)',
+  'var(--bfc-attn)',
+  'var(--bfc-warning)',
+  'var(--bfc-success)',
+  'var(--bfc-brand)',
+]
+function contextColor(type: string, index: number): string {
+  return CONTEXT_COLORS[type] ?? FALLBACK_CONTEXT_COLORS[index % FALLBACK_CONTEXT_COLORS.length]
+}
 
 function formatDuration(seconds: number): string {
   if (!seconds) return '0s'
@@ -250,6 +274,10 @@ function Dashboard() {
     ...point,
     label: dayFormatter.format(new Date(point.day)),
   }))
+  const contextData = (data?.context ?? []).map((c) => ({
+    ...c,
+    label: c.type.charAt(0).toUpperCase() + c.type.slice(1),
+  }))
 
   return (
     <div className="bf-page-padding">
@@ -279,18 +307,27 @@ function Dashboard() {
 
       {data && (
         <Grid gap={24}>
-          <Grid cols={1} small={2} large={4} gap={16}>
-            <StatTile icon={faBolt} label="Events (today)" value={compactFormatter.format(data.totals.events)} />
-            <StatTile icon={faTriangleExclamation} label="Errors (today)" value={compactFormatter.format(data.totals.errors)} />
+          <Grid cols={1} small={2} large={3} xl={5} gap={16}>
             <StatTile
-              icon={faWandMagicSparkles}
-              label="Solution agent runs (today)"
-              value={compactFormatter.format(data.totals.solutionAgentRuns)}
+              icon={faStopwatch}
+              label="Median response time (7d)"
+              value={formatDuration(data.totals.medianResponseTimeSec)}
             />
             <StatTile
-              icon={faTicket}
-              label="Unique tickets triggered (today)"
-              value={compactFormatter.format(data.totals.solutionAgentTickets)}
+              icon={faHourglassHalf}
+              label="Average response time (7d)"
+              value={formatDuration(data.totals.avgResponseTimeSec)}
+            />
+            <StatTile
+              icon={faBullseye}
+              label="High confidence solutions (7d)"
+              value={data.totals.highConfidencePct != null ? `${Math.round(data.totals.highConfidencePct)}%` : '—'}
+            />
+            <StatTile icon={faCoins} label="Tokens used (7d)" value={compactFormatter.format(data.totals.tokensUsed)} />
+            <StatTile
+              icon={faCommentDots}
+              label="Avg tokens per chat (7d)"
+              value={compactFormatter.format(data.totals.avgTokensPerChat)}
             />
           </Grid>
 
@@ -332,28 +369,64 @@ function Dashboard() {
             )}
           </SectionBox>
 
-          <SectionBox title="Events per hour (today)">
-            {chartData.length === 0 ? (
-              <Message state="neutral" noIcon>
-                No events recorded in Logfire yet.
-              </Message>
-            ) : (
-              <ResponsiveContainer width="100%" height={120}>
-                <BarChart data={chartData} margin={{ left: -20 }}>
-                  <XAxis
-                    axisLine={false}
-                    tickLine={false}
-                    dataKey="label"
-                    tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 11 }}
-                    dy={4}
-                  />
-                  <YAxis hide allowDecimals={false} />
-                  <Tooltip cursor={false} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
-                  <Bar dataKey="count" name="Events" fill="var(--bfc-chill)" radius={3} />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </SectionBox>
+          <Grid cols={1} large={2} gap={24}>
+            <SectionBox title="Events per hour (7d)">
+              {chartData.length === 0 ? (
+                <Message state="neutral" noIcon>
+                  No events recorded in Logfire yet.
+                </Message>
+              ) : (
+                <ResponsiveContainer width="100%" height={240}>
+                  <LineChart data={chartData} margin={{ left: -20 }}>
+                    <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
+                    <XAxis
+                      axisLine={false}
+                      tickLine={false}
+                      dataKey="label"
+                      tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 11 }}
+                      dy={8}
+                    />
+                    <YAxis axisLine={false} tickLine={false} allowDecimals={false} tick={{ fill: 'var(--bfc-base-c-2)' }} />
+                    <Tooltip
+                      cursor={{ stroke: 'var(--bfc-base-c-dimmed)' }}
+                      contentStyle={tooltipContentStyle}
+                      itemStyle={tooltipItemStyle}
+                      labelStyle={tooltipLabelStyle}
+                    />
+                    <Line type="monotone" dataKey="count" name="Events" stroke="var(--bfc-chill)" strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </SectionBox>
+
+            <SectionBox title="Agent usage by context (7d)">
+              {contextData.length === 0 ? (
+                <Message state="neutral" noIcon>
+                  No context data recorded yet.
+                </Message>
+              ) : (
+                <ResponsiveContainer width="100%" height={240}>
+                  <PieChart>
+                    <Pie
+                      data={contextData}
+                      dataKey="count"
+                      nameKey="label"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={80}
+                      label={({ name, value }) => `${name} (${value})`}
+                    >
+                      {contextData.map((entry, i) => (
+                        <Cell key={entry.type} fill={contextColor(entry.type, i)} />
+                      ))}
+                    </Pie>
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
+            </SectionBox>
+          </Grid>
 
           <Grid cols={1} large={2} xl={3} gap={24}>
             <SectionBox title="Estimated LLM cost per model (7d)">

@@ -22,11 +22,13 @@ export interface TicketRun {
 
 export interface DashboardData {
   totals: {
-    events: number
-    errors: number
-    solutionAgentRuns: number
-    solutionAgentTickets: number
+    medianResponseTimeSec: number
+    avgResponseTimeSec: number
+    highConfidencePct: number | null
+    tokensUsed: number
+    avgTokensPerChat: number
   }
+  context: { type: string; count: number }[]
   timeline: { hour: string; count: number }[]
   tools: { tool: string; count: number }[]
   models: {
