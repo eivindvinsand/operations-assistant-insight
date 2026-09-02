@@ -26,7 +26,7 @@ export interface DashboardData {
     avgResponseTimeSec: number
     highConfidencePct: number | null
     tokensUsed: number
-    avgTokensPerChat: number
+    costUsd: number
   }
   context: { type: string; count: number }[]
   timeline: { hour: string; count: number }[]

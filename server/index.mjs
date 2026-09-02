@@ -96,12 +96,15 @@ function groupRunsByTicket(runRows) {
 
 app.get("/api/dashboard", async (_req, res) => {
   try {
+    const startOfToday = new Date()
+    startOfToday.setUTCHours(0, 0, 0, 0)
+    const today = { minTimestamp: startOfToday.toISOString() }
     const activity = { hoursBack: HOURS_BACK_ACTIVITY }
     const insights = { hoursBack: HOURS_BACK_INSIGHTS }
     const [
       responseTimeResult,
       confidenceResult,
-      tokensPerChatResult,
+      tokensCostResult,
       contextResult,
       timelineResult,
       recentResult,
@@ -112,18 +115,18 @@ app.get("/api/dashboard", async (_req, res) => {
     ] = await Promise.all([
       logfireQuery(
         "SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent'",
-        insights,
+        today,
       ),
       logfireQuery(
         "SELECT count(distinct trace_id) as total, count(distinct trace_id) FILTER (WHERE attributes->>'final_result' ILIKE '%HØY%') as high FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' ILIKE '%Konfidens%'",
-        insights,
+        today,
       ),
       logfireQuery(
-        "SELECT sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT) + CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as total_tokens, count(distinct attributes->>'gen_ai.agent.call.id') as calls FROM records WHERE span_name = 'agent run'",
-        insights,
+        "SELECT sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT) + CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as total_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd FROM records WHERE span_name = 'agent run'",
+        today,
       ),
       logfireQuery(
-        "SELECT attributes->'context'->>'entity_type' as entity_type, count(*) as n FROM records WHERE span_name = 'chat.request' AND attributes->'context'->>'entity_type' IS NOT NULL GROUP BY 1 ORDER BY n DESC",
+        "SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, count(*) as n FROM records WHERE span_name = 'chat.request' GROUP BY 1 ORDER BY n DESC",
         insights,
       ),
       logfireQuery(
@@ -183,7 +186,7 @@ app.get("/api/dashboard", async (_req, res) => {
 
     const responseTimeRow = responseTimeResult.data[0] ?? { median_dur: 0, avg_dur: 0 }
     const confidenceRow = confidenceResult.data[0] ?? { total: 0, high: 0 }
-    const tokensPerChatRow = tokensPerChatResult.data[0] ?? { total_tokens: 0, calls: 0 }
+    const tokensCostRow = tokensCostResult.data[0] ?? { total_tokens: 0, cost_usd: 0 }
 
     res.json({
       totals: {
@@ -191,11 +194,8 @@ app.get("/api/dashboard", async (_req, res) => {
         avgResponseTimeSec: Number(responseTimeRow.avg_dur ?? 0),
         highConfidencePct:
           confidenceRow.total > 0 ? (Number(confidenceRow.high) / Number(confidenceRow.total)) * 100 : null,
-        tokensUsed: Number(tokensPerChatRow.total_tokens ?? 0),
-        avgTokensPerChat:
-          tokensPerChatRow.calls > 0
-            ? Number(tokensPerChatRow.total_tokens ?? 0) / Number(tokensPerChatRow.calls)
-            : 0,
+        tokensUsed: Number(tokensCostRow.total_tokens ?? 0),
+        costUsd: Number(tokensCostRow.cost_usd ?? 0),
       },
       context: contextResult.data
         .filter((row) => row.entity_type)

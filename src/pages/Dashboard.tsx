@@ -23,9 +23,8 @@ import {
   faCircleInfo,
   faCoins,
   faComments,
-  faCommentDots,
   faFlagCheckered,
-  faHourglassHalf,
+  faSackDollar,
   faStopwatch,
   faWrench,
 } from '@fortawesome/free-solid-svg-icons'
@@ -100,6 +99,7 @@ const CONTEXT_COLORS: Record<string, string> = {
   chat: 'var(--bfc-success)',
   change: 'var(--bfc-brand)',
   project: 'var(--bfc-base-c-2)',
+  none: 'var(--bfc-base-c-dimmed)',
 }
 const FALLBACK_CONTEXT_COLORS = [
   'var(--bfc-chill)',
@@ -146,6 +146,34 @@ function StatTile({
         <Inline.Stretch>
           <small className="bfc-base-2">{label}</small>
           <h5 className="bf-h5">{value}</h5>
+        </Inline.Stretch>
+      </Inline>
+    </Box>
+  )
+}
+
+function ResponseTimeTile({ medianSec, avgSec }: { medianSec: number; avgSec: number }) {
+  return (
+    <Box padding radius background="base-2">
+      <Inline gap={12} align="center">
+        <Box
+          radius="full"
+          background="base"
+          style={{ width: 40, height: 40, display: 'grid', placeItems: 'center' }}
+        >
+          <Icon icon={faStopwatch} className="bfc-base-2 bf-large" />
+        </Box>
+        <Inline.Stretch>
+          <small className="bfc-base-2">Response time (today)</small>
+          <Inline gap={16} align="center">
+            <span>
+              <span className="bf-h5">{formatDuration(medianSec)}</span>{' '}
+              <small className="bfc-base-2">median</small>
+            </span>
+            <span>
+              <span className="bf-h5">{formatDuration(avgSec)}</span> <small className="bfc-base-2">avg</small>
+            </span>
+          </Inline>
         </Inline.Stretch>
       </Inline>
     </Box>
@@ -276,7 +304,7 @@ function Dashboard() {
   }))
   const contextData = (data?.context ?? []).map((c) => ({
     ...c,
-    label: c.type.charAt(0).toUpperCase() + c.type.slice(1),
+    label: c.type === 'none' ? 'No context' : c.type.charAt(0).toUpperCase() + c.type.slice(1),
   }))
 
   return (
@@ -307,27 +335,17 @@ function Dashboard() {
 
       {data && (
         <Grid gap={24}>
-          <Grid cols={1} small={2} large={3} xl={5} gap={16}>
-            <StatTile
-              icon={faStopwatch}
-              label="Median response time (7d)"
-              value={formatDuration(data.totals.medianResponseTimeSec)}
+          <Grid cols={1} small={2} large={4} gap={16}>
+            <ResponseTimeTile
+              medianSec={data.totals.medianResponseTimeSec}
+              avgSec={data.totals.avgResponseTimeSec}
             />
-            <StatTile
-              icon={faHourglassHalf}
-              label="Average response time (7d)"
-              value={formatDuration(data.totals.avgResponseTimeSec)}
-            />
+            <StatTile icon={faSackDollar} label="Cost (today)" value={preciseCostFormatter.format(data.totals.costUsd)} />
+            <StatTile icon={faCoins} label="Tokens used (today)" value={compactFormatter.format(data.totals.tokensUsed)} />
             <StatTile
               icon={faBullseye}
-              label="High confidence solutions (7d)"
+              label="Avg. confidence (today)"
               value={data.totals.highConfidencePct != null ? `${Math.round(data.totals.highConfidencePct)}%` : '—'}
-            />
-            <StatTile icon={faCoins} label="Tokens used (7d)" value={compactFormatter.format(data.totals.tokensUsed)} />
-            <StatTile
-              icon={faCommentDots}
-              label="Avg tokens per chat (7d)"
-              value={compactFormatter.format(data.totals.avgTokensPerChat)}
             />
           </Grid>
 
@@ -413,14 +431,18 @@ function Dashboard() {
                       nameKey="label"
                       cx="50%"
                       cy="50%"
-                      outerRadius={80}
-                      label={({ name, value }) => `${name} (${value})`}
+                      innerRadius={56}
+                      outerRadius={88}
+                      paddingAngle={2}
+                      cornerRadius={3}
+                      stroke="var(--bfc-base-2)"
+                      strokeWidth={2}
                     >
                       {contextData.map((entry, i) => (
                         <Cell key={entry.type} fill={contextColor(entry.type, i)} />
                       ))}
                     </Pie>
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
                     <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
                   </PieChart>
                 </ResponsiveContainer>
