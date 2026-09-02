@@ -17,11 +17,8 @@ import {
   faBolt,
   faBrain,
   faCircleInfo,
-  faClock,
-  faCoins,
   faComments,
   faFlagCheckered,
-  faSackDollar,
   faTicket,
   faTriangleExclamation,
   faWandMagicSparkles,
@@ -282,7 +279,7 @@ function Dashboard() {
 
       {data && (
         <Grid gap={24}>
-          <Grid cols={1} small={2} large={3} xl={4} gap={16}>
+          <Grid cols={1} small={2} large={4} gap={16}>
             <StatTile icon={faBolt} label="Events (24h)" value={compactFormatter.format(data.totals.events)} />
             <StatTile icon={faTriangleExclamation} label="Errors (24h)" value={compactFormatter.format(data.totals.errors)} />
             <StatTile
@@ -295,55 +292,7 @@ function Dashboard() {
               label="Unique tickets triggered (7d)"
               value={compactFormatter.format(data.totals.solutionAgentTickets)}
             />
-            <StatTile
-              icon={faCoins}
-              label="Tokens used (7d)"
-              value={compactFormatter.format(data.totals.inputTokens + data.totals.outputTokens)}
-            />
-            <StatTile
-              icon={faSackDollar}
-              label="LLM cost (7d)"
-              value={costFormatter.format(data.totals.costUsd)}
-            />
-            <StatTile
-              icon={faClock}
-              label="Avg duration (7d)"
-              value={formatDuration(data.totals.solutionAgentAvgDurationSec)}
-            />
           </Grid>
-
-          <SectionBox title="Events per hour (24h)">
-            {chartData.length === 0 ? (
-              <Message state="neutral" noIcon>
-                No events recorded in Logfire yet.
-              </Message>
-            ) : (
-              <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={chartData} margin={{ left: -20 }}>
-                  <CartesianGrid
-                    strokeDasharray="5 5"
-                    vertical={false}
-                    stroke="var(--bfc-base-c-dimmed)"
-                  />
-                  <XAxis
-                    axisLine={false}
-                    tickLine={false}
-                    dataKey="label"
-                    tick={{ fill: 'var(--bfc-base-c-2)' }}
-                    dy={8}
-                  />
-                  <YAxis
-                    axisLine={false}
-                    tickLine={false}
-                    allowDecimals={false}
-                    tick={{ fill: 'var(--bfc-base-c-2)' }}
-                  />
-                  <Tooltip cursor={false} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
-                  <Bar dataKey="count" name="Events" fill="var(--bfc-chill)" radius={4} />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </SectionBox>
 
           <SectionBox title="LLM cost per day (7d)">
             {dailyCostData.length === 0 ? (
@@ -351,7 +300,7 @@ function Dashboard() {
                 No priced LLM calls recorded yet.
               </Message>
             ) : (
-              <ResponsiveContainer width="100%" height={260}>
+              <ResponsiveContainer width="100%" height={280}>
                 <ComposedChart data={dailyCostData} margin={{ left: -10 }}>
                   <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
                   <XAxis
@@ -379,6 +328,29 @@ function Dashboard() {
                     dot={{ r: 3 }}
                   />
                 </ComposedChart>
+              </ResponsiveContainer>
+            )}
+          </SectionBox>
+
+          <SectionBox title="Events per hour (24h)">
+            {chartData.length === 0 ? (
+              <Message state="neutral" noIcon>
+                No events recorded in Logfire yet.
+              </Message>
+            ) : (
+              <ResponsiveContainer width="100%" height={120}>
+                <BarChart data={chartData} margin={{ left: -20 }}>
+                  <XAxis
+                    axisLine={false}
+                    tickLine={false}
+                    dataKey="label"
+                    tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 11 }}
+                    dy={4}
+                  />
+                  <YAxis hide allowDecimals={false} />
+                  <Tooltip cursor={false} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
+                  <Bar dataKey="count" name="Events" fill="var(--bfc-chill)" radius={3} />
+                </BarChart>
               </ResponsiveContainer>
             )}
           </SectionBox>
