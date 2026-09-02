@@ -29,7 +29,7 @@ export interface DashboardData {
     costUsd: number
   }
   context: { type: string; count: number }[]
-  timeline: { hour: string; count: number }[]
+  dailyUsers: { day: string; users: number; messages: number }[]
   tools: { tool: string; count: number }[]
   models: {
     model: string

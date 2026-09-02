@@ -106,7 +106,7 @@ app.get("/api/dashboard", async (_req, res) => {
       confidenceResult,
       tokensCostResult,
       contextResult,
-      timelineResult,
+      dailyUsersResult,
       recentResult,
       toolsResult,
       modelsResult,
@@ -130,7 +130,7 @@ app.get("/api/dashboard", async (_req, res) => {
         insights,
       ),
       logfireQuery(
-        "SELECT date_trunc('hour', start_timestamp) as hour, count(*) as count FROM records GROUP BY 1 ORDER BY 1",
+        "SELECT date_trunc('day', start_timestamp) as day, count(distinct attributes->>'anon_user_id') as users, count(*) as messages FROM records WHERE span_name = 'chat.request' GROUP BY 1 ORDER BY 1",
         insights,
       ),
       logfireQuery(
@@ -197,12 +197,11 @@ app.get("/api/dashboard", async (_req, res) => {
         tokensUsed: Number(tokensCostRow.total_tokens ?? 0),
         costUsd: Number(tokensCostRow.cost_usd ?? 0),
       },
-      context: contextResult.data
-        .filter((row) => row.entity_type)
-        .map((row) => ({ type: row.entity_type, count: Number(row.n ?? 0) })),
-      timeline: timelineResult.data.map((row) => ({
-        hour: row.hour,
-        count: Number(row.count ?? 0),
+      context: contextResult.data.map((row) => ({ type: row.entity_type, count: Number(row.n ?? 0) })),
+      dailyUsers: dailyUsersResult.data.map((row) => ({
+        day: row.day,
+        users: Number(row.users ?? 0),
+        messages: Number(row.messages ?? 0),
       })),
       tools: toolsResult.data
         .filter((row) => row.tool)

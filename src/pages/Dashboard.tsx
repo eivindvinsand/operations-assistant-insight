@@ -8,7 +8,6 @@ import {
   ComposedChart,
   Legend,
   Line,
-  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -55,12 +54,6 @@ const levelBadgeState: Record<DashboardLevel, 'neutral' | 'warning' | 'alert'> =
   error: 'alert',
 }
 
-const hourFormatter = new Intl.DateTimeFormat('en-US', {
-  day: '2-digit',
-  month: '2-digit',
-  hour: '2-digit',
-})
-
 const timeFormatter = new Intl.DateTimeFormat('en-US', {
   dateStyle: 'short',
   timeStyle: 'medium',
@@ -91,6 +84,24 @@ const tooltipContentStyle = {
 }
 const tooltipItemStyle = { color: 'var(--bfc-base-c)' }
 const tooltipLabelStyle = { color: 'var(--bfc-base-c-2)' }
+
+function DailyUsersTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean
+  payload?: { payload: { label: string; users: number; messages: number } }[]
+}) {
+  if (!active || !payload?.length) return null
+  const point = payload[0].payload
+  return (
+    <div style={{ ...tooltipContentStyle, padding: '8px 12px' }}>
+      <div style={{ ...tooltipLabelStyle, marginBottom: 4 }}>{point.label}</div>
+      <div style={tooltipItemStyle}>{point.users} active users</div>
+      <div style={tooltipItemStyle}>{point.messages} messages</div>
+    </div>
+  )
+}
 
 const CONTEXT_COLORS: Record<string, string> = {
   ticket: 'var(--bfc-chill)',
@@ -288,9 +299,9 @@ function Dashboard() {
     load()
   }, [load])
 
-  const chartData = (data?.timeline ?? []).map((point) => ({
+  const dailyUsersData = (data?.dailyUsers ?? []).map((point) => ({
     ...point,
-    label: hourFormatter.format(new Date(point.hour)),
+    label: dayFormatter.format(new Date(point.day)),
   }))
 
   const toolData = data?.tools ?? []
@@ -388,14 +399,14 @@ function Dashboard() {
           </SectionBox>
 
           <Grid cols={1} large={2} gap={24}>
-            <SectionBox title="Events per hour (7d)">
-              {chartData.length === 0 ? (
+            <SectionBox title="Daily active users (7d)">
+              {dailyUsersData.length === 0 ? (
                 <Message state="neutral" noIcon>
-                  No events recorded in Logfire yet.
+                  No chat activity recorded yet.
                 </Message>
               ) : (
                 <ResponsiveContainer width="100%" height={240}>
-                  <LineChart data={chartData} margin={{ left: -20 }}>
+                  <BarChart data={dailyUsersData} margin={{ left: -20 }}>
                     <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
                     <XAxis
                       axisLine={false}
@@ -405,14 +416,9 @@ function Dashboard() {
                       dy={8}
                     />
                     <YAxis axisLine={false} tickLine={false} allowDecimals={false} tick={{ fill: 'var(--bfc-base-c-2)' }} />
-                    <Tooltip
-                      cursor={{ stroke: 'var(--bfc-base-c-dimmed)' }}
-                      contentStyle={tooltipContentStyle}
-                      itemStyle={tooltipItemStyle}
-                      labelStyle={tooltipLabelStyle}
-                    />
-                    <Line type="monotone" dataKey="count" name="Events" stroke="var(--bfc-chill)" strokeWidth={2} dot={false} />
-                  </LineChart>
+                    <Tooltip cursor={false} content={<DailyUsersTooltip />} />
+                    <Bar dataKey="users" name="Active users" fill="var(--bfc-chill)" radius={4} />
+                  </BarChart>
                 </ResponsiveContainer>
               )}
             </SectionBox>
