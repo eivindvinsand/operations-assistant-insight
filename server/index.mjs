@@ -113,6 +113,7 @@ app.get("/api/dashboard", async (_req, res) => {
       errorsTotalResult,
       errorKindsResult,
       toolFailuresResult,
+      usageResult,
       recentResult,
       toolsResult,
       modelsResult,
@@ -149,6 +150,10 @@ app.get("/api/dashboard", async (_req, res) => {
         insights,
       ),
       logfireQuery(
+        "SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, attributes->'context'->>'entity_id' as entity_id, count(*) as n, max(start_timestamp) as last_seen FROM records WHERE span_name = 'chat.request' GROUP BY 1, 2 ORDER BY last_seen DESC LIMIT 100",
+        insights,
+      ),
+      logfireQuery(
         "SELECT start_timestamp, service_name, level, message FROM records ORDER BY start_timestamp DESC LIMIT 15",
         activity,
       ),
@@ -170,10 +175,11 @@ app.get("/api/dashboard", async (_req, res) => {
       ),
     ])
 
-    const grouped = groupRunsByTicket(solutionRunsResult.data).slice(0, 15)
+    const allTickets = groupRunsByTicket(solutionRunsResult.data)
+    const detailedTickets = allTickets.slice(0, 15)
     const traceIds = [
       ...new Set(
-        grouped.flatMap((t) => t.runs.map((r) => r.trace_id)).filter((id) => TRACE_ID_RE.test(id)),
+        detailedTickets.flatMap((t) => t.runs.map((r) => r.trace_id)).filter((id) => TRACE_ID_RE.test(id)),
       ),
     ]
 
@@ -197,6 +203,47 @@ app.get("/api/dashboard", async (_req, res) => {
           durationSec: row.duration ?? 0,
         })
       }
+    }
+
+    /** Per-ticket solution-agent stats, keyed by reference number. Full step detail (and
+     * therefore cost, which lives on nested spans) is only available for `detailedTickets`. */
+    const solutionByTicket = new Map()
+    for (const t of allTickets) {
+      const runs = t.runs.map((r) => {
+        const steps = stepsByTrace.get(r.trace_id)
+        if (!steps) {
+          return {
+            traceId: r.trace_id,
+            timestamp: r.start_timestamp,
+            outcome: r.outcome ?? "unknown",
+            durationSec: r.duration_s ?? 0,
+            steps: [],
+            solution: null,
+            costUsd: null,
+          }
+        }
+        const agentSteps = steps.filter((s) => s.type === "agent" && s.output)
+        const solution = agentSteps.length > 0 ? agentSteps[agentSteps.length - 1].output : null
+        const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
+        return {
+          traceId: r.trace_id,
+          timestamp: r.start_timestamp,
+          outcome: r.outcome ?? "unknown",
+          durationSec: r.duration_s ?? 0,
+          steps,
+          solution,
+          costUsd,
+        }
+      })
+      const knownCosts = runs.filter((r) => r.costUsd != null)
+      solutionByTicket.set(t.ticket, {
+        triggers: runs.length,
+        lastSeen: t.lastSeen,
+        exceptions: t.runs.filter((r) => r.outcome === "exception").length,
+        avgDurationSec: t.runs.reduce((sum, r) => sum + (r.duration_s ?? 0), 0) / t.runs.length,
+        costUsd: knownCosts.length > 0 ? knownCosts.reduce((sum, r) => sum + r.costUsd, 0) : null,
+        runs,
+      })
     }
 
     const responseTimeRow = responseTimeResult.data[0] ?? { median_dur: 0, avg_dur: 0 }
@@ -239,30 +286,20 @@ app.get("/api/dashboard", async (_req, res) => {
           costUsd: row.cost_usd != null ? Number(row.cost_usd) : null,
           calls: Number(row.calls ?? 0),
         })),
-      tickets: grouped.map((t) => {
-        const runs = t.runs.map((r) => {
-          const steps = stepsByTrace.get(r.trace_id) ?? []
-          const agentSteps = steps.filter((s) => s.type === "agent" && s.output)
-          const solution = agentSteps.length > 0 ? agentSteps[agentSteps.length - 1].output : null
-          const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
-          return {
-            traceId: r.trace_id,
-            timestamp: r.start_timestamp,
-            outcome: r.outcome ?? "unknown",
-            durationSec: r.duration_s ?? 0,
-            steps,
-            solution,
-            costUsd,
-          }
-        })
+      usage: usageResult.data.map((row) => {
+        const entityType = row.entity_type
+        const entityId = row.entity_id && row.entity_id !== "0" ? row.entity_id : null
+        const solution = entityType === "ticket" && entityId ? solutionByTicket.get(entityId) : null
         return {
-          ticket: t.ticket,
-          triggers: runs.length,
-          lastSeen: t.lastSeen,
-          exceptions: t.runs.filter((r) => r.outcome === "exception").length,
-          avgDurationSec: t.runs.reduce((sum, r) => sum + (r.duration_s ?? 0), 0) / t.runs.length,
-          costUsd: runs.reduce((sum, r) => sum + r.costUsd, 0),
-          runs,
+          entityType,
+          entityId,
+          uses: Number(row.n ?? 0),
+          lastSeen: row.last_seen,
+          triggers: solution?.triggers ?? 0,
+          avgDurationSec: solution?.avgDurationSec ?? 0,
+          costUsd: solution?.costUsd ?? null,
+          exceptions: solution?.exceptions ?? 0,
+          runs: solution?.runs ?? [],
         }
       }),
       dailyCost: (() => {

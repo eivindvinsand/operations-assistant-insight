@@ -40,13 +40,15 @@ export interface DashboardData {
     costUsd: number | null
     calls: number
   }[]
-  tickets: {
-    ticket: string
-    triggers: number
+  usage: {
+    entityType: string
+    entityId: string | null
+    uses: number
     lastSeen: string
-    exceptions: number
+    triggers: number
     avgDurationSec: number
-    costUsd: number
+    costUsd: number | null
+    exceptions: number
     runs: TicketRun[]
   }[]
   dailyCost: { day: string; cost: number; cumulativeCost: number }[]

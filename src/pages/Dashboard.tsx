@@ -53,7 +53,32 @@ import {
   type ToolFailureExample,
 } from '../lib/dashboard'
 
-const TICKET_URL_BASE = 'https://internal-operations-staging.apps.aa.intility.com/tickets'
+const OPS_MANAGER_BASE = 'https://internal-operations-staging.apps.aa.intility.com'
+
+// Only "tickets" is confirmed - the others follow the same URL pattern but haven't been verified.
+const ENTITY_URL_BASE: Record<string, string> = {
+  ticket: `${OPS_MANAGER_BASE}/tickets`,
+  incident: `${OPS_MANAGER_BASE}/incidents`,
+  problem: `${OPS_MANAGER_BASE}/problems`,
+  change: `${OPS_MANAGER_BASE}/changes`,
+  project: `${OPS_MANAGER_BASE}/projects`,
+}
+
+const entityBadgeState: Record<string, 'neutral' | 'warning' | 'alert' | 'success' | 'brand' | 'chill' | 'attn'> = {
+  ticket: 'chill',
+  incident: 'attn',
+  problem: 'warning',
+  chat: 'success',
+  change: 'brand',
+  project: 'brand',
+  none: 'neutral',
+}
+
+function entityLink(entityType: string, entityId: string | null): string | null {
+  const base = ENTITY_URL_BASE[entityType]
+  if (!base || !entityId) return null
+  return `${base}/${entityId}`
+}
 
 const levelBadgeState: Record<DashboardLevel, 'neutral' | 'warning' | 'alert'> = {
   debug: 'neutral',
@@ -353,6 +378,7 @@ function Dashboard() {
   const [errorModal, setErrorModal] = useState<AsyncModalState<ErrorExample> | null>(null)
   const [toolFailureModal, setToolFailureModal] = useState<AsyncModalState<ToolFailureExample> | null>(null)
   const [dayLogModal, setDayLogModal] = useState<AsyncModalState<DayLogEntry> | null>(null)
+  const [usageFilter, setUsageFilter] = useState<string>('all')
 
   const openErrorModal = useCallback((kind: string) => {
     setErrorModal({ title: kind, items: null, loading: true, error: null })
@@ -407,6 +433,11 @@ function Dashboard() {
     ...c,
     label: c.type === 'none' ? 'No context' : c.type.charAt(0).toUpperCase() + c.type.slice(1),
   }))
+
+  const usageTypes = [...new Set((data?.usage ?? []).map((u) => u.entityType))]
+  const filteredUsage = (data?.usage ?? []).filter(
+    (u) => usageFilter === 'all' || u.entityType === usageFilter,
+  )
 
   return (
     <div className="bf-page-padding">
@@ -646,18 +677,33 @@ function Dashboard() {
             </SectionBox>
           </Grid>
 
-          <SectionBox title="Tickets solution agent worked on (7d)">
-            {data.tickets.length === 0 ? (
+          <SectionBox title="Usage log (7d)">
+            <Inline align="center" gap={8} style={{ marginBottom: 16, flexWrap: 'wrap' }}>
+              <Button.Group>
+                <Button active={usageFilter === 'all'} onClick={() => setUsageFilter('all')}>
+                  All ({data.usage.length})
+                </Button>
+                {usageTypes.map((type) => (
+                  <Button key={type} active={usageFilter === type} onClick={() => setUsageFilter(type)}>
+                    {type === 'none' ? 'No context' : type.charAt(0).toUpperCase() + type.slice(1)} (
+                    {data.usage.filter((u) => u.entityType === type).length})
+                  </Button>
+                ))}
+              </Button.Group>
+            </Inline>
+            {filteredUsage.length === 0 ? (
               <Message state="neutral" noIcon>
-                Solution agent has not been triggered yet.
+                No usage recorded for this filter yet.
               </Message>
             ) : (
               <Table>
                 <Table.Header>
                   <Table.Row>
                     <Table.HeaderCell></Table.HeaderCell>
-                    <Table.HeaderCell>Ticket</Table.HeaderCell>
-                    <Table.HeaderCell>Times triggered</Table.HeaderCell>
+                    <Table.HeaderCell>Type</Table.HeaderCell>
+                    <Table.HeaderCell>Reference</Table.HeaderCell>
+                    <Table.HeaderCell>Uses</Table.HeaderCell>
+                    <Table.HeaderCell>Solution triggers</Table.HeaderCell>
                     <Table.HeaderCell>Avg duration</Table.HeaderCell>
                     <Table.HeaderCell>Cost</Table.HeaderCell>
                     <Table.HeaderCell>Outcome</Table.HeaderCell>
@@ -665,28 +711,44 @@ function Dashboard() {
                   </Table.Row>
                 </Table.Header>
                 <Table.Body>
-                  {data.tickets.map((row) => (
-                    <Table.Row key={row.ticket} content={<TicketRunDetails runs={row.runs} />}>
-                      <Table.Cell>
-                        <a href={`${TICKET_URL_BASE}/${row.ticket}`} target="_blank" rel="noreferrer">
-                          #{row.ticket}
-                        </a>
-                      </Table.Cell>
-                      <Table.Cell>{row.triggers}</Table.Cell>
-                      <Table.Cell>{formatDuration(row.avgDurationSec)}</Table.Cell>
-                      <Table.Cell>
-                        {row.costUsd > 0 ? preciseCostFormatter.format(row.costUsd) : '—'}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {row.exceptions > 0 ? (
-                          <Badge state="alert">{row.exceptions} failed</Badge>
-                        ) : (
-                          <Badge state="neutral">OK</Badge>
-                        )}
-                      </Table.Cell>
-                      <Table.Cell>{timeFormatter.format(new Date(row.lastSeen))}</Table.Cell>
-                    </Table.Row>
-                  ))}
+                  {filteredUsage.map((row) => {
+                    const link = entityLink(row.entityType, row.entityId)
+                    return (
+                      <Table.Row
+                        key={`${row.entityType}-${row.entityId ?? 'none'}`}
+                        content={row.runs.length > 0 ? <TicketRunDetails runs={row.runs} /> : undefined}
+                      >
+                        <Table.Cell>
+                          <Badge state={entityBadgeState[row.entityType] ?? 'neutral'}>{row.entityType}</Badge>
+                        </Table.Cell>
+                        <Table.Cell>
+                          {link ? (
+                            <a href={link} target="_blank" rel="noreferrer">
+                              #{row.entityId}
+                            </a>
+                          ) : (
+                            (row.entityId ?? '—')
+                          )}
+                        </Table.Cell>
+                        <Table.Cell>{row.uses}</Table.Cell>
+                        <Table.Cell>{row.triggers || '—'}</Table.Cell>
+                        <Table.Cell>{row.triggers > 0 ? formatDuration(row.avgDurationSec) : '—'}</Table.Cell>
+                        <Table.Cell>
+                          {row.costUsd != null ? preciseCostFormatter.format(row.costUsd) : '—'}
+                        </Table.Cell>
+                        <Table.Cell>
+                          {row.triggers === 0 ? (
+                            '—'
+                          ) : row.exceptions > 0 ? (
+                            <Badge state="alert">{row.exceptions} failed</Badge>
+                          ) : (
+                            <Badge state="neutral">OK</Badge>
+                          )}
+                        </Table.Cell>
+                        <Table.Cell>{timeFormatter.format(new Date(row.lastSeen))}</Table.Cell>
+                      </Table.Row>
+                    )
+                  })}
                 </Table.Body>
               </Table>
             )}
