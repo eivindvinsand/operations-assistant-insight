@@ -37,13 +37,20 @@ import Badge from '@intility/bifrost-react/Badge'
 import Message from '@intility/bifrost-react/Message'
 import Table from '@intility/bifrost-react/Table'
 import Accordion from '@intility/bifrost-react/Accordion'
+import Modal from '@intility/bifrost-react/Modal'
 import {
   fetchDashboard,
+  fetchDayLog,
+  fetchErrorExamples,
+  fetchToolFailureExamples,
   type DashboardData,
   type DashboardLevel,
+  type DayLogEntry,
+  type ErrorExample,
   type RunStep,
   type StepType,
   type TicketRun,
+  type ToolFailureExample,
 } from '../lib/dashboard'
 
 const TICKET_URL_BASE = 'https://internal-operations-staging.apps.aa.intility.com/tickets'
@@ -122,6 +129,55 @@ const FALLBACK_CONTEXT_COLORS = [
 ]
 function contextColor(type: string, index: number): string {
   return CONTEXT_COLORS[type] ?? FALLBACK_CONTEXT_COLORS[index % FALLBACK_CONTEXT_COLORS.length]
+}
+
+const BREAKDOWN_COLORS = [
+  'var(--bfc-chill)',
+  'var(--bfc-attn)',
+  'var(--bfc-warning)',
+  'var(--bfc-success)',
+  'var(--bfc-brand)',
+  'var(--bfc-base-c-2)',
+]
+
+function BreakdownBars({
+  items,
+  onSelect,
+}: {
+  items: { label: string; count: number }[]
+  onSelect: (label: string) => void
+}) {
+  const max = items[0]?.count ?? 1
+  return (
+    <Grid gap={8}>
+      {items.map((item, i) => (
+        <button
+          key={item.label}
+          type="button"
+          onClick={() => onSelect(item.label)}
+          style={{ all: 'unset', cursor: 'pointer', display: 'block', width: '100%' }}
+        >
+          <Inline align="center" gap={12}>
+            <Inline.Stretch>
+              <small className="bfc-base-2" style={{ display: 'block', marginBottom: 2 }}>
+                {item.label}
+              </small>
+              <div style={{ height: 6, background: 'var(--bfc-base-3)', borderRadius: 3, overflow: 'hidden' }}>
+                <div
+                  style={{
+                    height: '100%',
+                    width: `${(item.count / max) * 100}%`,
+                    background: BREAKDOWN_COLORS[i % BREAKDOWN_COLORS.length],
+                  }}
+                />
+              </div>
+            </Inline.Stretch>
+            <small className="bfc-base-2">{item.count}</small>
+          </Inline>
+        </button>
+      ))}
+    </Grid>
+  )
 }
 
 function formatDuration(seconds: number): string {
@@ -282,10 +338,43 @@ function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
   )
 }
 
+interface AsyncModalState<T> {
+  title: string
+  items: T[] | null
+  loading: boolean
+  error: string | null
+}
+
 function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+
+  const [errorModal, setErrorModal] = useState<AsyncModalState<ErrorExample> | null>(null)
+  const [toolFailureModal, setToolFailureModal] = useState<AsyncModalState<ToolFailureExample> | null>(null)
+  const [dayLogModal, setDayLogModal] = useState<AsyncModalState<DayLogEntry> | null>(null)
+
+  const openErrorModal = useCallback((kind: string) => {
+    setErrorModal({ title: kind, items: null, loading: true, error: null })
+    fetchErrorExamples(kind)
+      .then((items) => setErrorModal({ title: kind, items, loading: false, error: null }))
+      .catch((e: Error) => setErrorModal({ title: kind, items: null, loading: false, error: e.message }))
+  }, [])
+
+  const openToolFailureModal = useCallback((tool: string) => {
+    setToolFailureModal({ title: tool, items: null, loading: true, error: null })
+    fetchToolFailureExamples(tool)
+      .then((items) => setToolFailureModal({ title: tool, items, loading: false, error: null }))
+      .catch((e: Error) => setToolFailureModal({ title: tool, items: null, loading: false, error: e.message }))
+  }, [])
+
+  const openDayLogModal = useCallback((dayIso: string) => {
+    const date = dayIso.slice(0, 10)
+    setDayLogModal({ title: date, items: null, loading: true, error: null })
+    fetchDayLog(date)
+      .then((items) => setDayLogModal({ title: date, items, loading: false, error: null }))
+      .catch((e: Error) => setDayLogModal({ title: date, items: null, loading: false, error: e.message }))
+  }, [])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -401,6 +490,11 @@ function Dashboard() {
 
           <Grid cols={1} large={2} gap={24}>
             <SectionBox title="Daily active users (7d)">
+              {dailyUsersData.length > 0 && (
+                <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
+                  Click a bar to see that day's log
+                </small>
+              )}
               {dailyUsersData.length === 0 ? (
                 <Message state="neutral" noIcon>
                   No chat activity recorded yet.
@@ -418,7 +512,16 @@ function Dashboard() {
                     />
                     <YAxis axisLine={false} tickLine={false} allowDecimals={false} tick={{ fill: 'var(--bfc-base-c-2)' }} />
                     <Tooltip cursor={false} content={<DailyUsersTooltip />} />
-                    <Bar dataKey="users" name="Active users" fill="var(--bfc-chill)" radius={4} />
+                    <Bar
+                      dataKey="users"
+                      name="Active users"
+                      fill="var(--bfc-chill)"
+                      radius={4}
+                      cursor="pointer"
+                      onClick={(entry: { payload?: { day: string } }) => {
+                        if (entry.payload) openDayLogModal(entry.payload.day)
+                      }}
+                    />
                   </BarChart>
                 </ResponsiveContainer>
               )}
@@ -589,42 +692,33 @@ function Dashboard() {
             )}
           </SectionBox>
 
-          <SectionBox title="Errors (7d)">
-            <Inline align="center" gap={12} style={{ marginBottom: data.errors.byKind.length > 0 ? 16 : 0 }}>
-              <Icon icon={faTriangleExclamation} className="bfc-alert bf-large" />
-              <span className="bf-h5">{compactFormatter.format(data.errors.total)} errors</span>
-            </Inline>
-            {data.errors.byKind.length > 0 && (
-              <Grid gap={8}>
-                {data.errors.byKind.map((e) => (
-                  <Inline key={e.kind} align="center" gap={12}>
-                    <Inline.Stretch>
-                      <small className="bfc-base-2" style={{ display: 'block', marginBottom: 2 }}>
-                        {e.kind}
-                      </small>
-                      <div
-                        style={{
-                          height: 6,
-                          background: 'var(--bfc-base-3)',
-                          borderRadius: 3,
-                          overflow: 'hidden',
-                        }}
-                      >
-                        <div
-                          style={{
-                            height: '100%',
-                            width: `${(e.count / data.errors.byKind[0].count) * 100}%`,
-                            background: 'var(--bfc-alert)',
-                          }}
-                        />
-                      </div>
-                    </Inline.Stretch>
-                    <small className="bfc-base-2">{e.count}</small>
-                  </Inline>
-                ))}
-              </Grid>
-            )}
-          </SectionBox>
+          <Grid cols={1} large={2} gap={24}>
+            <SectionBox title="Errors (7d)">
+              <Inline align="center" gap={12} style={{ marginBottom: data.errors.byKind.length > 0 ? 16 : 0 }}>
+                <Icon icon={faTriangleExclamation} className="bfc-alert bf-large" />
+                <span className="bf-h5">{compactFormatter.format(data.errors.total)} errors</span>
+              </Inline>
+              {data.errors.byKind.length > 0 && (
+                <BreakdownBars
+                  items={data.errors.byKind.map((e) => ({ label: e.kind, count: e.count }))}
+                  onSelect={openErrorModal}
+                />
+              )}
+            </SectionBox>
+
+            <SectionBox title="Tool call failures (7d)">
+              {data.toolFailures.length === 0 ? (
+                <Message state="neutral" noIcon>
+                  No tool call failures recorded.
+                </Message>
+              ) : (
+                <BreakdownBars
+                  items={data.toolFailures.map((t) => ({ label: t.tool, count: t.count }))}
+                  onSelect={openToolFailureModal}
+                />
+              )}
+            </SectionBox>
+          </Grid>
 
           <SectionBox title="Recent events (24h)">
             {data.recent.length === 0 ? (
@@ -658,6 +752,127 @@ function Dashboard() {
           </SectionBox>
         </Grid>
       )}
+
+      <Modal
+        isOpen={errorModal != null}
+        onRequestClose={() => setErrorModal(null)}
+        header={errorModal?.title}
+        width={700}
+      >
+        {errorModal?.loading && (
+          <Inline align="center" gap={8}>
+            <Icon.Spinner size={20} />
+            <span>Loading examples …</span>
+          </Inline>
+        )}
+        {errorModal?.error && (
+          <Message state="alert" noIcon>
+            {errorModal.error}
+          </Message>
+        )}
+        {errorModal?.items && (
+          <Table>
+            <Table.Header>
+              <Table.Row>
+                <Table.HeaderCell>Time</Table.HeaderCell>
+                <Table.HeaderCell>Service</Table.HeaderCell>
+                <Table.HeaderCell>Message</Table.HeaderCell>
+              </Table.Row>
+            </Table.Header>
+            <Table.Body>
+              {errorModal.items.map((e, i) => (
+                <Table.Row key={i}>
+                  <Table.Cell>{timeFormatter.format(new Date(e.time))}</Table.Cell>
+                  <Table.Cell>{e.service}</Table.Cell>
+                  <Table.Cell style={{ wordBreak: 'break-word' }}>{e.message}</Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={toolFailureModal != null}
+        onRequestClose={() => setToolFailureModal(null)}
+        header={toolFailureModal?.title}
+        width={700}
+      >
+        {toolFailureModal?.loading && (
+          <Inline align="center" gap={8}>
+            <Icon.Spinner size={20} />
+            <span>Loading examples …</span>
+          </Inline>
+        )}
+        {toolFailureModal?.error && (
+          <Message state="alert" noIcon>
+            {toolFailureModal.error}
+          </Message>
+        )}
+        {toolFailureModal?.items && (
+          <Table>
+            <Table.Header>
+              <Table.Row>
+                <Table.HeaderCell>Time</Table.HeaderCell>
+                <Table.HeaderCell>Kind</Table.HeaderCell>
+                <Table.HeaderCell>Detail</Table.HeaderCell>
+              </Table.Row>
+            </Table.Header>
+            <Table.Body>
+              {toolFailureModal.items.map((t, i) => (
+                <Table.Row key={i}>
+                  <Table.Cell>{timeFormatter.format(new Date(t.time))}</Table.Cell>
+                  <Table.Cell>
+                    <Badge state={t.kind === 'timeout' ? 'warning' : 'alert'}>{t.kind}</Badge>
+                  </Table.Cell>
+                  <Table.Cell style={{ wordBreak: 'break-word' }}>{t.detail}</Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={dayLogModal != null}
+        onRequestClose={() => setDayLogModal(null)}
+        header={dayLogModal ? `Activity log · ${dayLogModal.title}` : undefined}
+        width={700}
+      >
+        {dayLogModal?.loading && (
+          <Inline align="center" gap={8}>
+            <Icon.Spinner size={20} />
+            <span>Loading log …</span>
+          </Inline>
+        )}
+        {dayLogModal?.error && (
+          <Message state="alert" noIcon>
+            {dayLogModal.error}
+          </Message>
+        )}
+        {dayLogModal?.items && (
+          <Table>
+            <Table.Header>
+              <Table.Row>
+                <Table.HeaderCell>Time</Table.HeaderCell>
+                <Table.HeaderCell>User</Table.HeaderCell>
+                <Table.HeaderCell>Context</Table.HeaderCell>
+                <Table.HeaderCell>Model</Table.HeaderCell>
+              </Table.Row>
+            </Table.Header>
+            <Table.Body>
+              {dayLogModal.items.map((entry, i) => (
+                <Table.Row key={i}>
+                  <Table.Cell>{timeFormatter.format(new Date(entry.time))}</Table.Cell>
+                  <Table.Cell>{entry.userId}</Table.Cell>
+                  <Table.Cell>{entry.entityType}</Table.Cell>
+                  <Table.Cell>{entry.model}</Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table>
+        )}
+      </Modal>
     </div>
   )
 }

@@ -27,6 +27,9 @@ function sqlList(values) {
 
 const SKIPPED_SPANS = new Set(["POST /api/v2/chat", "OPTIONS /api/v2/chat", "chat.request"])
 
+const TOOL_FAILURE_TEMPLATES = ["MCP tool %s raised exception: %s", "MCP tool %s timed out after %ds"]
+const TOOL_FAILURE_TEMPLATE_LIST = TOOL_FAILURE_TEMPLATES.map((t) => `'${t}'`).join(",")
+
 /** Extracts assistant text from a chat span's gen_ai.output.messages attribute. */
 function extractChatOutput(attributes) {
   const messages = attributes?.["gen_ai.output.messages"]
@@ -109,6 +112,7 @@ app.get("/api/dashboard", async (_req, res) => {
       dailyUsersResult,
       errorsTotalResult,
       errorKindsResult,
+      toolFailuresResult,
       recentResult,
       toolsResult,
       modelsResult,
@@ -138,6 +142,10 @@ app.get("/api/dashboard", async (_req, res) => {
       logfireQuery("SELECT count(*) as n FROM records WHERE level >= 17", insights),
       logfireQuery(
         "SELECT COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) as kind, count(*) as n FROM records WHERE level >= 17 GROUP BY 1 ORDER BY n DESC LIMIT 6",
+        insights,
+      ),
+      logfireQuery(
+        `SELECT attributes->'logfire.logging_args'->>0 as tool, count(*) as n FROM records WHERE level >= 17 AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) GROUP BY 1 ORDER BY n DESC LIMIT 10`,
         insights,
       ),
       logfireQuery(
@@ -216,6 +224,9 @@ app.get("/api/dashboard", async (_req, res) => {
           .filter((row) => row.kind)
           .map((row) => ({ kind: row.kind, count: Number(row.n ?? 0) })),
       },
+      toolFailures: toolFailuresResult.data
+        .filter((row) => row.tool)
+        .map((row) => ({ tool: row.tool, count: Number(row.n ?? 0) })),
       tools: toolsResult.data
         .filter((row) => row.tool)
         .map((row) => ({ tool: row.tool, count: Number(row.n ?? 0) })),
@@ -271,6 +282,75 @@ app.get("/api/dashboard", async (_req, res) => {
     })
   } catch (e) {
     console.error("[logfire] dashboard query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/errors/:kind", async (req, res) => {
+  try {
+    const kind = req.params.kind.replace(/'/g, "''")
+    const insights = { hoursBack: HOURS_BACK_INSIGHTS }
+    const result = await logfireQuery(
+      `SELECT start_timestamp, service_name, message, exception_message FROM records WHERE level >= 17 AND COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) = '${kind}' ORDER BY start_timestamp DESC LIMIT 15`,
+      insights,
+    )
+    res.json({
+      examples: result.data.map((row) => ({
+        time: row.start_timestamp,
+        service: row.service_name ?? "unknown",
+        message: row.exception_message || row.message || "",
+      })),
+    })
+  } catch (e) {
+    console.error("[logfire] error examples query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/tool-failures/:tool", async (req, res) => {
+  try {
+    const tool = req.params.tool.replace(/'/g, "''")
+    const insights = { hoursBack: HOURS_BACK_INSIGHTS }
+    const result = await logfireQuery(
+      `SELECT start_timestamp, attributes->>'logfire.msg_template' as template, attributes->'logfire.logging_args'->>1 as detail FROM records WHERE level >= 17 AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) AND attributes->'logfire.logging_args'->>0 = '${tool}' ORDER BY start_timestamp DESC LIMIT 15`,
+      insights,
+    )
+    res.json({
+      examples: result.data.map((row) => ({
+        time: row.start_timestamp,
+        kind: row.template?.includes("timed out") ? "timeout" : "exception",
+        detail: row.template?.includes("timed out") ? `Timed out after ${row.detail}s` : row.detail ?? "",
+      })),
+    })
+  } catch (e) {
+    console.error("[logfire] tool failure examples query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/day-log", async (req, res) => {
+  try {
+    const date = String(req.query.date ?? "")
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: "date must be YYYY-MM-DD" })
+    }
+    const minTimestamp = `${date}T00:00:00.000Z`
+    const maxTimestamp = new Date(new Date(minTimestamp).getTime() + 24 * 60 * 60 * 1000).toISOString()
+    const result = await logfireQuery(
+      "SELECT start_timestamp, attributes->>'anon_user_id' as user_id, attributes->'context'->>'entity_type' as entity_type, attributes->'context'->>'entity_id' as entity_id, attributes->>'model' as model FROM records WHERE span_name = 'chat.request' ORDER BY start_timestamp DESC LIMIT 200",
+      { minTimestamp, maxTimestamp },
+    )
+    res.json({
+      entries: result.data.map((row) => ({
+        time: row.start_timestamp,
+        userId: row.user_id ?? "unknown",
+        entityType: row.entity_type ?? "none",
+        entityId: row.entity_id ?? null,
+        model: row.model ?? "unknown",
+      })),
+    })
+  } catch (e) {
+    console.error("[logfire] day log query failed:", e.message)
     res.status(e.status ?? 502).json({ error: e.message })
   }
 })
