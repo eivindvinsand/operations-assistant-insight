@@ -4,7 +4,9 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
   Legend,
+  Line,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -71,6 +73,14 @@ const costFormatter = new Intl.NumberFormat('en-US', {
   notation: 'compact',
   maximumFractionDigits: 2,
 })
+
+const preciseCostFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  maximumFractionDigits: 3,
+})
+
+const dayFormatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: '2-digit' })
 
 function formatDuration(seconds: number): string {
   if (!seconds) return '0s'
@@ -171,6 +181,9 @@ function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
               <Badge state="neutral">Completed</Badge>
             )}
             <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
+            {run.costUsd > 0 && (
+              <span className="bfc-base-2">{preciseCostFormatter.format(run.costUsd)}</span>
+            )}
           </Inline>
 
           {run.solution && (
@@ -227,6 +240,10 @@ function Dashboard() {
   const costData = (data?.models ?? [])
     .filter((m) => m.costUsd != null)
     .sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0))
+  const dailyCostData = (data?.dailyCost ?? []).map((point) => ({
+    ...point,
+    label: dayFormatter.format(new Date(point.day)),
+  }))
 
   return (
     <div className="bf-page-padding">
@@ -315,6 +332,44 @@ function Dashboard() {
                   <Tooltip cursor={false} />
                   <Bar dataKey="count" name="Events" fill="var(--bfc-chill)" radius={4} />
                 </BarChart>
+              </ResponsiveContainer>
+            )}
+          </SectionBox>
+
+          <SectionBox title="LLM cost per day (7d)">
+            {dailyCostData.length === 0 ? (
+              <Message state="neutral" noIcon>
+                No priced LLM calls recorded yet.
+              </Message>
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <ComposedChart data={dailyCostData} margin={{ left: -10 }}>
+                  <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
+                  <XAxis
+                    axisLine={false}
+                    tickLine={false}
+                    dataKey="label"
+                    tick={{ fill: 'var(--bfc-base-c-2)' }}
+                    dy={8}
+                  />
+                  <YAxis
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fill: 'var(--bfc-base-c-2)' }}
+                    tickFormatter={(v) => costFormatter.format(v)}
+                  />
+                  <Tooltip cursor={false} formatter={(v) => costFormatter.format(Number(v))} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey="cost" name="Daily cost" fill="var(--bfc-chill)" radius={4} />
+                  <Line
+                    type="monotone"
+                    dataKey="cumulativeCost"
+                    name="Cumulative cost"
+                    stroke="var(--bfc-attn)"
+                    strokeWidth={2}
+                    dot={{ r: 3 }}
+                  />
+                </ComposedChart>
               </ResponsiveContainer>
             )}
           </SectionBox>
@@ -418,6 +473,7 @@ function Dashboard() {
                     <Table.HeaderCell>Ticket</Table.HeaderCell>
                     <Table.HeaderCell>Times triggered</Table.HeaderCell>
                     <Table.HeaderCell>Avg duration</Table.HeaderCell>
+                    <Table.HeaderCell>Cost</Table.HeaderCell>
                     <Table.HeaderCell>Outcome</Table.HeaderCell>
                     <Table.HeaderCell>Last seen</Table.HeaderCell>
                   </Table.Row>
@@ -432,6 +488,9 @@ function Dashboard() {
                       </Table.Cell>
                       <Table.Cell>{row.triggers}</Table.Cell>
                       <Table.Cell>{formatDuration(row.avgDurationSec)}</Table.Cell>
+                      <Table.Cell>
+                        {row.costUsd > 0 ? preciseCostFormatter.format(row.costUsd) : '—'}
+                      </Table.Cell>
                       <Table.Cell>
                         {row.exceptions > 0 ? (
                           <Badge state="alert">{row.exceptions} failed</Badge>

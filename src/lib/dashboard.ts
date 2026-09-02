@@ -17,6 +17,7 @@ export interface TicketRun {
   durationSec: number
   steps: RunStep[]
   solution: string | null
+  costUsd: number
 }
 
 export interface DashboardData {
@@ -45,8 +46,10 @@ export interface DashboardData {
     lastSeen: string
     exceptions: number
     avgDurationSec: number
+    costUsd: number
     runs: TicketRun[]
   }[]
+  dailyCost: { day: string; cost: number; cumulativeCost: number }[]
   recent: {
     time: string
     service: string

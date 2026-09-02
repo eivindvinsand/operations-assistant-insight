@@ -47,7 +47,13 @@ function classifyStep(row) {
   const spanName = row.span_name
 
   if (attributes["gen_ai.operation.name"] === "invoke_agent") {
-    return { type: "agent", label: "Agent reasoning", output: attributes.final_result ?? null }
+    const cost = attributes["logfire.metrics"]?.["operation.cost"]?.total
+    return {
+      type: "agent",
+      label: "Agent reasoning",
+      output: attributes.final_result ?? null,
+      costUsd: typeof cost === "number" ? cost : null,
+    }
   }
   if (spanName.startsWith("chat ")) {
     const model = attributes.model_name ?? attributes["gen_ai.request.model"] ?? spanName.slice(5)
@@ -101,6 +107,7 @@ app.get("/api/dashboard", async (_req, res) => {
       modelsResult,
       solutionTotalsResult,
       solutionRunsResult,
+      dailyCostResult,
     ] = await Promise.all([
       logfireQuery(
         "SELECT count(*) as events, count(*) FILTER (WHERE level >= 17) as errors FROM records",
@@ -134,6 +141,10 @@ app.get("/api/dashboard", async (_req, res) => {
         "SELECT trace_id, start_timestamp, attributes->>'reference_number' as ticket, attributes->>'outcome' as outcome, CAST(attributes->>'duration_s' AS DOUBLE) as duration_s FROM records WHERE span_name = 'solution_agent_finished' ORDER BY start_timestamp DESC LIMIT 200",
         insights,
       ),
+      logfireQuery(
+        "SELECT date_trunc('day', start_timestamp) as day, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost FROM records WHERE span_name = 'agent run' GROUP BY 1 ORDER BY 1",
+        insights,
+      ),
     ])
 
     const grouped = groupRunsByTicket(solutionRunsResult.data).slice(0, 15)
@@ -157,6 +168,7 @@ app.get("/api/dashboard", async (_req, res) => {
         if (!stepsByTrace.has(row.trace_id)) stepsByTrace.set(row.trace_id, [])
         const classified = classifyStep(row)
         stepsByTrace.get(row.trace_id).push({
+          costUsd: null,
           ...classified,
           startedAt: row.start_timestamp,
           durationSec: row.duration ?? 0,
@@ -195,17 +207,12 @@ app.get("/api/dashboard", async (_req, res) => {
           costUsd: row.cost_usd != null ? Number(row.cost_usd) : null,
           calls: Number(row.calls ?? 0),
         })),
-      tickets: grouped.map((t) => ({
-        ticket: t.ticket,
-        triggers: t.runs.length,
-        lastSeen: t.lastSeen,
-        exceptions: t.runs.filter((r) => r.outcome === "exception").length,
-        avgDurationSec:
-          t.runs.reduce((sum, r) => sum + (r.duration_s ?? 0), 0) / t.runs.length,
-        runs: t.runs.map((r) => {
+      tickets: grouped.map((t) => {
+        const runs = t.runs.map((r) => {
           const steps = stepsByTrace.get(r.trace_id) ?? []
           const agentSteps = steps.filter((s) => s.type === "agent" && s.output)
           const solution = agentSteps.length > 0 ? agentSteps[agentSteps.length - 1].output : null
+          const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
           return {
             traceId: r.trace_id,
             timestamp: r.start_timestamp,
@@ -213,9 +220,27 @@ app.get("/api/dashboard", async (_req, res) => {
             durationSec: r.duration_s ?? 0,
             steps,
             solution,
+            costUsd,
           }
-        }),
-      })),
+        })
+        return {
+          ticket: t.ticket,
+          triggers: runs.length,
+          lastSeen: t.lastSeen,
+          exceptions: t.runs.filter((r) => r.outcome === "exception").length,
+          avgDurationSec: t.runs.reduce((sum, r) => sum + (r.duration_s ?? 0), 0) / t.runs.length,
+          costUsd: runs.reduce((sum, r) => sum + r.costUsd, 0),
+          runs,
+        }
+      }),
+      dailyCost: (() => {
+        let cumulative = 0
+        return dailyCostResult.data.map((row) => {
+          const cost = Number(row.cost ?? 0)
+          cumulative += cost
+          return { day: row.day, cost, cumulativeCost: cumulative }
+        })
+      })(),
       recent: recentResult.data.map((row) => ({
         time: row.start_timestamp,
         service: row.service_name ?? "unknown",
