@@ -30,6 +30,7 @@ export interface DashboardData {
   }
   context: { type: string; count: number }[]
   dailyUsers: { day: string; users: number; messages: number }[]
+  errors: { total: number; byKind: { kind: string; count: number }[] }
   tools: { tool: string; count: number }[]
   models: {
     model: string

@@ -107,6 +107,8 @@ app.get("/api/dashboard", async (_req, res) => {
       tokensCostResult,
       contextResult,
       dailyUsersResult,
+      errorsTotalResult,
+      errorKindsResult,
       recentResult,
       toolsResult,
       modelsResult,
@@ -131,6 +133,11 @@ app.get("/api/dashboard", async (_req, res) => {
       ),
       logfireQuery(
         "SELECT date_trunc('day', start_timestamp) as day, count(distinct attributes->>'anon_user_id') as users, count(*) as messages FROM records WHERE span_name = 'chat.request' GROUP BY 1 ORDER BY 1",
+        insights,
+      ),
+      logfireQuery("SELECT count(*) as n FROM records WHERE level >= 17", insights),
+      logfireQuery(
+        "SELECT COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) as kind, count(*) as n FROM records WHERE level >= 17 GROUP BY 1 ORDER BY n DESC LIMIT 6",
         insights,
       ),
       logfireQuery(
@@ -203,6 +210,12 @@ app.get("/api/dashboard", async (_req, res) => {
         users: Number(row.users ?? 0),
         messages: Number(row.messages ?? 0),
       })),
+      errors: {
+        total: Number(errorsTotalResult.data[0]?.n ?? 0),
+        byKind: errorKindsResult.data
+          .filter((row) => row.kind)
+          .map((row) => ({ kind: row.kind, count: Number(row.n ?? 0) })),
+      },
       tools: toolsResult.data
         .filter((row) => row.tool)
         .map((row) => ({ tool: row.tool, count: Number(row.n ?? 0) })),

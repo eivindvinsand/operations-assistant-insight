@@ -25,6 +25,7 @@ import {
   faFlagCheckered,
   faSackDollar,
   faStopwatch,
+  faTriangleExclamation,
   faWrench,
 } from '@fortawesome/free-solid-svg-icons'
 import Box from '@intility/bifrost-react/Box'
@@ -585,6 +586,43 @@ function Dashboard() {
                   ))}
                 </Table.Body>
               </Table>
+            )}
+          </SectionBox>
+
+          <SectionBox title="Errors (7d)">
+            <Inline align="center" gap={12} style={{ marginBottom: data.errors.byKind.length > 0 ? 16 : 0 }}>
+              <Icon icon={faTriangleExclamation} className="bfc-alert bf-large" />
+              <span className="bf-h5">{compactFormatter.format(data.errors.total)} errors</span>
+            </Inline>
+            {data.errors.byKind.length > 0 && (
+              <Grid gap={8}>
+                {data.errors.byKind.map((e) => (
+                  <Inline key={e.kind} align="center" gap={12}>
+                    <Inline.Stretch>
+                      <small className="bfc-base-2" style={{ display: 'block', marginBottom: 2 }}>
+                        {e.kind}
+                      </small>
+                      <div
+                        style={{
+                          height: 6,
+                          background: 'var(--bfc-base-3)',
+                          borderRadius: 3,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <div
+                          style={{
+                            height: '100%',
+                            width: `${(e.count / data.errors.byKind[0].count) * 100}%`,
+                            background: 'var(--bfc-alert)',
+                          }}
+                        />
+                      </div>
+                    </Inline.Stretch>
+                    <small className="bfc-base-2">{e.count}</small>
+                  </Inline>
+                ))}
+              </Grid>
             )}
           </SectionBox>
 
