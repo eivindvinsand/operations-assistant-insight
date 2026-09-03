@@ -151,6 +151,25 @@ function DailyUsersTooltip({
   )
 }
 
+function ModelCostTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean
+  payload?: { payload: { model: string; costUsd: number; inputTokens: number; outputTokens: number } }[]
+}) {
+  if (!active || !payload?.length) return null
+  const point = payload[0].payload
+  return (
+    <div style={{ ...tooltipContentStyle, padding: '8px 12px' }}>
+      <div style={{ ...tooltipLabelStyle, marginBottom: 4 }}>{point.model}</div>
+      <div style={tooltipItemStyle}>{costFormatter.format(point.costUsd)} cost</div>
+      <div style={tooltipItemStyle}>{compactFormatter.format(point.inputTokens)} input tokens</div>
+      <div style={tooltipItemStyle}>{compactFormatter.format(point.outputTokens)} output tokens</div>
+    </div>
+  )
+}
+
 const CONTEXT_COLORS: Record<string, string> = {
   ticket: 'var(--bfc-chill)',
   incident: 'var(--bfc-attn)',
@@ -506,7 +525,6 @@ function Dashboard() {
   }))
 
   const toolData = data?.tools ?? []
-  const modelData = data?.models ?? []
   const costData = (data?.models ?? [])
     .filter((m) => m.costUsd != null)
     .sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0))
@@ -702,8 +720,8 @@ function Dashboard() {
             </SectionBox>
           </Grid>
 
-          <Grid cols={1} large={2} xl={3} gap={24}>
-            <SectionBox title="Estimated LLM cost per model (7d)">
+          <Grid cols={1} large={2} gap={24}>
+            <SectionBox title="LLM cost & tokens per model (7d)">
               {costData.length === 0 ? (
                 <Message state="neutral" noIcon>
                   Logfire has no pricing data for the models used yet (self-hosted/internal
@@ -728,7 +746,7 @@ function Dashboard() {
                       width={160}
                       tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 12 }}
                     />
-                    <Tooltip cursor={false} formatter={(v) => costFormatter.format(Number(v))} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
+                    <Tooltip cursor={false} content={<ModelCostTooltip />} />
                     <Bar dataKey="costUsd" name="Cost" fill="var(--bfc-chill)" radius={4} />
                   </BarChart>
                 </ResponsiveContainer>
@@ -759,115 +777,7 @@ function Dashboard() {
                 </ResponsiveContainer>
               )}
             </SectionBox>
-
-            <SectionBox title="Token usage per model (7d)">
-              {modelData.length === 0 ? (
-                <Message state="neutral" noIcon>
-                  No model calls recorded yet.
-                </Message>
-              ) : (
-                <ResponsiveContainer width="100%" height={Math.max(240, modelData.length * 32)}>
-                  <BarChart data={modelData} layout="vertical" margin={{ left: 20 }}>
-                    <CartesianGrid strokeDasharray="5 5" horizontal={false} stroke="var(--bfc-base-c-dimmed)" />
-                    <XAxis type="number" axisLine={false} tickLine={false} allowDecimals={false} tick={{ fill: 'var(--bfc-base-c-2)' }} />
-                    <YAxis
-                      type="category"
-                      dataKey="model"
-                      axisLine={false}
-                      tickLine={false}
-                      width={160}
-                      tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 12 }}
-                    />
-                    <Tooltip cursor={false} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <Bar dataKey="inputTokens" name="Input" stackId="tokens" fill="var(--bfc-chill)" radius={0} />
-                    <Bar dataKey="outputTokens" name="Output" stackId="tokens" fill="var(--bfc-attn)" radius={[0, 4, 4, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </SectionBox>
           </Grid>
-
-          <SectionBox title="Usage log (7d)">
-            <Inline align="center" gap={8} style={{ marginBottom: 16, flexWrap: 'wrap' }}>
-              <Button.Group>
-                <Button active={usageFilter === 'all'} onClick={() => setUsageFilter('all')}>
-                  All ({data.usage.length})
-                </Button>
-                {usageTypes.map((type) => (
-                  <Button key={type} active={usageFilter === type} onClick={() => setUsageFilter(type)}>
-                    {type === 'none' ? 'No context' : type.charAt(0).toUpperCase() + type.slice(1)} (
-                    {data.usage.filter((u) => u.entityType === type).length})
-                  </Button>
-                ))}
-              </Button.Group>
-            </Inline>
-            {filteredUsage.length === 0 ? (
-              <Message state="neutral" noIcon>
-                No usage recorded for this filter yet.
-              </Message>
-            ) : (
-              <Table key={usageFilter}>
-                <Table.Header>
-                  <Table.Row>
-                    <Table.HeaderCell></Table.HeaderCell>
-                    <Table.HeaderCell>Timestamp</Table.HeaderCell>
-                    <Table.HeaderCell>Type</Table.HeaderCell>
-                    <Table.HeaderCell>Reference</Table.HeaderCell>
-                    <Table.HeaderCell>Uses</Table.HeaderCell>
-                    <Table.HeaderCell>Solution triggers</Table.HeaderCell>
-                    <Table.HeaderCell>Avg duration</Table.HeaderCell>
-                    <Table.HeaderCell>Cost</Table.HeaderCell>
-                    <Table.HeaderCell>Outcome</Table.HeaderCell>
-                  </Table.Row>
-                </Table.Header>
-                <Table.Body>
-                  {filteredUsage.map((row) => {
-                    const link = entityLink(row.entityType, row.entityId)
-                    const usageKey = `${row.entityType}-${row.entityId ?? 'none'}`
-                    return (
-                      <Table.Row
-                        key={usageKey}
-                        content={
-                          <UsageRowDetails solutionRuns={row.runs} chatRuns={usageRunsByKey[usageKey]} />
-                        }
-                        onOpenChange={() => loadUsageRuns(row.entityType, row.entityId)}
-                      >
-                        <Table.Cell>{formatUsageTimestamp(row.lastSeen)}</Table.Cell>
-                        <Table.Cell>
-                          <Badge state={entityBadgeState[row.entityType] ?? 'neutral'}>{row.entityType}</Badge>
-                        </Table.Cell>
-                        <Table.Cell>
-                          {link ? (
-                            <a href={link} target="_blank" rel="noreferrer">
-                              #{row.entityId}
-                            </a>
-                          ) : (
-                            (row.entityId ?? '—')
-                          )}
-                        </Table.Cell>
-                        <Table.Cell>{row.uses}</Table.Cell>
-                        <Table.Cell>{row.triggers || '—'}</Table.Cell>
-                        <Table.Cell>{row.triggers > 0 ? formatDuration(row.avgDurationSec) : '—'}</Table.Cell>
-                        <Table.Cell>
-                          {row.costUsd != null ? preciseCostFormatter.format(row.costUsd) : '—'}
-                        </Table.Cell>
-                        <Table.Cell>
-                          {row.triggers === 0 ? (
-                            '—'
-                          ) : row.exceptions > 0 ? (
-                            <Badge state="alert">{row.exceptions} failed</Badge>
-                          ) : (
-                            <Badge state="neutral">OK</Badge>
-                          )}
-                        </Table.Cell>
-                      </Table.Row>
-                    )
-                  })}
-                </Table.Body>
-              </Table>
-            )}
-          </SectionBox>
 
           <Grid cols={1} large={3} gap={24}>
             <SectionBox title="Errors (7d)">
@@ -917,6 +827,97 @@ function Dashboard() {
               )}
             </SectionBox>
           </Grid>
+
+          <SectionBox title="Usage log (7d)">
+            <Inline align="center" gap={8} style={{ marginBottom: 16, flexWrap: 'wrap' }}>
+              <Button.Group>
+                <Button active={usageFilter === 'all'} onClick={() => setUsageFilter('all')}>
+                  All ({data.usage.length})
+                </Button>
+                {usageTypes.map((type) => (
+                  <Button key={type} active={usageFilter === type} onClick={() => setUsageFilter(type)}>
+                    {type === 'none' ? 'No context' : type.charAt(0).toUpperCase() + type.slice(1)} (
+                    {data.usage.filter((u) => u.entityType === type).length})
+                  </Button>
+                ))}
+              </Button.Group>
+            </Inline>
+            {filteredUsage.length === 0 ? (
+              <Message state="neutral" noIcon>
+                No usage recorded for this filter yet.
+              </Message>
+            ) : (
+              <Table key={usageFilter}>
+                <Table.Header>
+                  <Table.Row>
+                    <Table.HeaderCell></Table.HeaderCell>
+                    <Table.HeaderCell>Timestamp</Table.HeaderCell>
+                    <Table.HeaderCell>Type</Table.HeaderCell>
+                    <Table.HeaderCell>Reference</Table.HeaderCell>
+                    <Table.HeaderCell>Model</Table.HeaderCell>
+                    <Table.HeaderCell>Reasoning</Table.HeaderCell>
+                    <Table.HeaderCell>Uses</Table.HeaderCell>
+                    <Table.HeaderCell>Solution triggers</Table.HeaderCell>
+                    <Table.HeaderCell>Avg duration</Table.HeaderCell>
+                    <Table.HeaderCell>Cost</Table.HeaderCell>
+                    <Table.HeaderCell>Outcome</Table.HeaderCell>
+                  </Table.Row>
+                </Table.Header>
+                <Table.Body>
+                  {filteredUsage.map((row) => {
+                    const link = entityLink(row.entityType, row.entityId)
+                    const usageKey = `${row.entityType}-${row.entityId ?? 'none'}`
+                    return (
+                      <Table.Row
+                        key={usageKey}
+                        content={
+                          <UsageRowDetails solutionRuns={row.runs} chatRuns={usageRunsByKey[usageKey]} />
+                        }
+                        onOpenChange={() => loadUsageRuns(row.entityType, row.entityId)}
+                      >
+                        <Table.Cell>{formatUsageTimestamp(row.lastSeen)}</Table.Cell>
+                        <Table.Cell>
+                          <Badge state={entityBadgeState[row.entityType] ?? 'neutral'}>{row.entityType}</Badge>
+                        </Table.Cell>
+                        <Table.Cell>
+                          {link ? (
+                            <a href={link} target="_blank" rel="noreferrer">
+                              #{row.entityId}
+                            </a>
+                          ) : (
+                            (row.entityId ?? '—')
+                          )}
+                        </Table.Cell>
+                        <Table.Cell>{row.model ?? '—'}</Table.Cell>
+                        <Table.Cell>
+                          {row.reasoningEffort ? (
+                            <Badge state="neutral">{row.reasoningEffort}</Badge>
+                          ) : (
+                            '—'
+                          )}
+                        </Table.Cell>
+                        <Table.Cell>{row.uses}</Table.Cell>
+                        <Table.Cell>{row.triggers || '—'}</Table.Cell>
+                        <Table.Cell>{row.triggers > 0 ? formatDuration(row.avgDurationSec) : '—'}</Table.Cell>
+                        <Table.Cell>
+                          {row.costUsd != null ? preciseCostFormatter.format(row.costUsd) : '—'}
+                        </Table.Cell>
+                        <Table.Cell>
+                          {row.triggers === 0 ? (
+                            '—'
+                          ) : row.exceptions > 0 ? (
+                            <Badge state="alert">{row.exceptions} failed</Badge>
+                          ) : (
+                            <Badge state="neutral">OK</Badge>
+                          )}
+                        </Table.Cell>
+                      </Table.Row>
+                    )
+                  })}
+                </Table.Body>
+              </Table>
+            )}
+          </SectionBox>
 
           <SectionBox title="Recent events (24h)">
             {data.recent.length === 0 ? (

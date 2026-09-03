@@ -211,7 +211,18 @@ app.get("/api/dashboard", async (req, res) => {
         insights,
       ),
       logfireQuery(
-        `SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, attributes->'context'->>'entity_id' as entity_id, count(*) as n, max(start_timestamp) as last_seen FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' GROUP BY 1, 2 ORDER BY last_seen DESC LIMIT 100`,
+        `SELECT entity_type, entity_id, n, last_seen, model, reasoning_effort FROM (
+          SELECT
+            COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
+            attributes->'context'->>'entity_id' as entity_id,
+            attributes->>'model' as model,
+            attributes->>'reasoning_effort' as reasoning_effort,
+            start_timestamp,
+            COUNT(*) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id') as n,
+            MAX(start_timestamp) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id') as last_seen,
+            ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id' ORDER BY start_timestamp DESC) as rn
+          FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
+        ) WHERE rn = 1 ORDER BY last_seen DESC LIMIT 100`,
         insights,
       ),
       logfireQuery(
@@ -357,6 +368,8 @@ app.get("/api/dashboard", async (req, res) => {
           entityId,
           uses: Number(row.n ?? 0),
           lastSeen: row.last_seen,
+          model: row.model ?? null,
+          reasoningEffort: row.reasoning_effort && row.reasoning_effort !== "none" ? row.reasoning_effort : null,
           triggers: solution?.triggers ?? 0,
           avgDurationSec: solution?.avgDurationSec ?? 0,
           costUsd: solution?.costUsd ?? null,

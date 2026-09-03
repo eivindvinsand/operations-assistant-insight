@@ -55,6 +55,8 @@ export interface DashboardData {
     entityId: string | null
     uses: number
     lastSeen: string
+    model: string | null
+    reasoningEffort: string | null
     triggers: number
     avgDurationSec: number
     costUsd: number | null
