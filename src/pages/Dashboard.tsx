@@ -109,6 +109,16 @@ const preciseCostFormatter = new Intl.NumberFormat('en-US', {
 
 const dayFormatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: '2-digit' })
 
+const usageMonthFormatter = new Intl.DateTimeFormat('en-US', { month: 'short' })
+
+/** Formats like "3.Sep, 08:17". */
+function formatUsageTimestamp(iso: string): string {
+  const d = new Date(iso)
+  const hours = String(d.getHours()).padStart(2, '0')
+  const minutes = String(d.getMinutes()).padStart(2, '0')
+  return `${d.getDate()}.${usageMonthFormatter.format(d)}, ${hours}:${minutes}`
+}
+
 const tooltipContentStyle = {
   background: 'var(--bfc-base-3)',
   border: '1px solid var(--bfc-base-c-dimmed)',
@@ -704,10 +714,11 @@ function Dashboard() {
                 No usage recorded for this filter yet.
               </Message>
             ) : (
-              <Table>
+              <Table key={usageFilter}>
                 <Table.Header>
                   <Table.Row>
                     <Table.HeaderCell></Table.HeaderCell>
+                    <Table.HeaderCell>Timestamp</Table.HeaderCell>
                     <Table.HeaderCell>Type</Table.HeaderCell>
                     <Table.HeaderCell>Reference</Table.HeaderCell>
                     <Table.HeaderCell>Uses</Table.HeaderCell>
@@ -715,7 +726,6 @@ function Dashboard() {
                     <Table.HeaderCell>Avg duration</Table.HeaderCell>
                     <Table.HeaderCell>Cost</Table.HeaderCell>
                     <Table.HeaderCell>Outcome</Table.HeaderCell>
-                    <Table.HeaderCell>Last seen</Table.HeaderCell>
                   </Table.Row>
                 </Table.Header>
                 <Table.Body>
@@ -726,6 +736,7 @@ function Dashboard() {
                         key={`${row.entityType}-${row.entityId ?? 'none'}`}
                         content={row.runs.length > 0 ? <TicketRunDetails runs={row.runs} /> : undefined}
                       >
+                        <Table.Cell>{formatUsageTimestamp(row.lastSeen)}</Table.Cell>
                         <Table.Cell>
                           <Badge state={entityBadgeState[row.entityType] ?? 'neutral'}>{row.entityType}</Badge>
                         </Table.Cell>
@@ -753,7 +764,6 @@ function Dashboard() {
                             <Badge state="neutral">OK</Badge>
                           )}
                         </Table.Cell>
-                        <Table.Cell>{timeFormatter.format(new Date(row.lastSeen))}</Table.Cell>
                       </Table.Row>
                     )
                   })}
