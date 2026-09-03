@@ -230,7 +230,7 @@ app.get("/api/dashboard", async (req, res) => {
         activity,
       ),
       logfireQuery(
-        `SELECT attributes->>'gen_ai.tool.name' as tool, count(*) as n FROM records WHERE span_name = 'running tool' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC LIMIT 10`,
+        `SELECT substring(span_name, 12) as tool, count(*) as n FROM records WHERE span_name LIKE 'tools/call %' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC LIMIT 10`,
         insights,
       ),
       logfireQuery(
