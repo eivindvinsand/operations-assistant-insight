@@ -83,6 +83,17 @@ export async function fetchDashboard(env: Environment): Promise<DashboardData> {
   return fetchJson(`/api/dashboard?env=${env}`)
 }
 
+export async function fetchUsageRuns(
+  entityType: string,
+  entityId: string | null,
+  env: Environment,
+): Promise<TicketRun[]> {
+  const params = new URLSearchParams({ entityType, env })
+  if (entityId) params.set('entityId', entityId)
+  const body = await fetchJson<{ runs: TicketRun[] }>(`/api/usage-runs?${params.toString()}`)
+  return body.runs
+}
+
 export interface ErrorExample {
   time: string
   service: string

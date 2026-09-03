@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { marked } from 'marked'
 import {
   Bar,
@@ -45,6 +45,7 @@ import {
   fetchErrorExamples,
   fetchSecurityJudgeExamples,
   fetchToolFailureExamples,
+  fetchUsageRuns,
   type DashboardData,
   type DashboardLevel,
   type DayLogEntry,
@@ -360,6 +361,53 @@ function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
   )
 }
 
+interface UsageRunsState {
+  items: TicketRun[] | null
+  loading: boolean
+  error: string | null
+}
+
+function UsageRowDetails({
+  solutionRuns,
+  chatRuns,
+}: {
+  solutionRuns: TicketRun[]
+  chatRuns: UsageRunsState | undefined
+}) {
+  return (
+    <Grid gap={16} style={{ padding: '4px 0 12px' }}>
+      {solutionRuns.length > 0 && (
+        <Box>
+          <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
+            Solution agent runs
+          </small>
+          <TicketRunDetails runs={solutionRuns} />
+        </Box>
+      )}
+
+      <Box>
+        <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
+          Chat exchanges
+        </small>
+        {!chatRuns || chatRuns.loading ? (
+          <Inline align="center" gap={8}>
+            <Icon.Spinner size={16} />
+            <span className="bfc-base-2">Loading chat history …</span>
+          </Inline>
+        ) : chatRuns.error ? (
+          <Message state="alert" noIcon>
+            {chatRuns.error}
+          </Message>
+        ) : chatRuns.items && chatRuns.items.length > 0 ? (
+          <TicketRunDetails runs={chatRuns.items} />
+        ) : (
+          <small className="bfc-base-2">No chat exchanges recorded.</small>
+        )}
+      </Box>
+    </Grid>
+  )
+}
+
 interface AsyncModalState<T> {
   title: string
   items: T[] | null
@@ -377,6 +425,8 @@ function Dashboard() {
   const [securityJudgeModal, setSecurityJudgeModal] = useState<AsyncModalState<SecurityJudgeExample> | null>(null)
   const [dayLogModal, setDayLogModal] = useState<AsyncModalState<DayLogEntry> | null>(null)
   const [usageFilter, setUsageFilter] = useState<string>('all')
+  const [usageRunsByKey, setUsageRunsByKey] = useState<Record<string, UsageRunsState>>({})
+  const loadedUsageKeys = useRef(new Set<string>())
   const [environment, setEnvironment] = useState<Environment>(DEFAULT_ENVIRONMENT)
 
   const openErrorModal = useCallback(
@@ -409,6 +459,21 @@ function Dashboard() {
     [environment],
   )
 
+  const loadUsageRuns = useCallback(
+    (entityType: string, entityId: string | null) => {
+      const key = `${entityType}-${entityId ?? 'none'}`
+      if (loadedUsageKeys.current.has(key)) return
+      loadedUsageKeys.current.add(key)
+      setUsageRunsByKey((prev) => ({ ...prev, [key]: { items: null, loading: true, error: null } }))
+      fetchUsageRuns(entityType, entityId, environment)
+        .then((items) => setUsageRunsByKey((prev) => ({ ...prev, [key]: { items, loading: false, error: null } })))
+        .catch((e: Error) =>
+          setUsageRunsByKey((prev) => ({ ...prev, [key]: { items: null, loading: false, error: e.message } })),
+        )
+    },
+    [environment],
+  )
+
   const openDayLogModal = useCallback(
     (dayIso: string) => {
       const date = dayIso.slice(0, 10)
@@ -423,6 +488,8 @@ function Dashboard() {
   const load = useCallback(() => {
     setLoading(true)
     setError(null)
+    loadedUsageKeys.current.clear()
+    setUsageRunsByKey({})
     fetchDashboard(environment)
       .then(setData)
       .catch((e: Error) => setError(e.message))
@@ -757,10 +824,14 @@ function Dashboard() {
                 <Table.Body>
                   {filteredUsage.map((row) => {
                     const link = entityLink(row.entityType, row.entityId)
+                    const usageKey = `${row.entityType}-${row.entityId ?? 'none'}`
                     return (
                       <Table.Row
-                        key={`${row.entityType}-${row.entityId ?? 'none'}`}
-                        content={row.runs.length > 0 ? <TicketRunDetails runs={row.runs} /> : undefined}
+                        key={usageKey}
+                        content={
+                          <UsageRowDetails solutionRuns={row.runs} chatRuns={usageRunsByKey[usageKey]} />
+                        }
+                        onOpenChange={() => loadUsageRuns(row.entityType, row.entityId)}
                       >
                         <Table.Cell>{formatUsageTimestamp(row.lastSeen)}</Table.Cell>
                         <Table.Cell>

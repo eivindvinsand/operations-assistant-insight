@@ -108,6 +108,32 @@ function classifyStep(row) {
   }
 }
 
+/** Fetches every span in the given traces and classifies each into a step, grouped by trace_id.
+ * Also returns the set of traces containing an error/warning-level span. */
+async function fetchStepsByTrace(traceIds, insights) {
+  const stepsByTrace = new Map()
+  const exceptionTraces = new Set()
+  if (traceIds.length === 0) return { stepsByTrace, exceptionTraces }
+  const traceList = sqlList(traceIds)
+  const result = await logfireQuery(
+    `SELECT trace_id, start_timestamp, duration, span_name, message, level, attributes FROM records WHERE trace_id IN (${traceList}) ORDER BY start_timestamp`,
+    insights,
+  )
+  for (const row of result.data) {
+    if (row.level >= 17) exceptionTraces.add(row.trace_id)
+    if (SKIPPED_SPANS.has(row.span_name)) continue
+    if (!stepsByTrace.has(row.trace_id)) stepsByTrace.set(row.trace_id, [])
+    const classified = classifyStep(row)
+    stepsByTrace.get(row.trace_id).push({
+      costUsd: null,
+      ...classified,
+      startedAt: row.start_timestamp,
+      durationSec: row.duration ?? 0,
+    })
+  }
+  return { stepsByTrace, exceptionTraces }
+}
+
 /** Groups ungrouped solution_agent_finished rows into one entry per ticket, newest run first. */
 function groupRunsByTicket(runRows) {
   const byTicket = new Map()
@@ -218,27 +244,7 @@ app.get("/api/dashboard", async (req, res) => {
       ),
     ]
 
-    let stepsByTrace = new Map()
-
-    if (traceIds.length > 0) {
-      const traceList = sqlList(traceIds)
-      const runStepsResult = await logfireQuery(
-        `SELECT trace_id, start_timestamp, duration, span_name, message, attributes FROM records WHERE trace_id IN (${traceList}) ORDER BY start_timestamp`,
-        insights,
-      )
-
-      for (const row of runStepsResult.data) {
-        if (SKIPPED_SPANS.has(row.span_name)) continue
-        if (!stepsByTrace.has(row.trace_id)) stepsByTrace.set(row.trace_id, [])
-        const classified = classifyStep(row)
-        stepsByTrace.get(row.trace_id).push({
-          costUsd: null,
-          ...classified,
-          startedAt: row.start_timestamp,
-          durationSec: row.duration ?? 0,
-        })
-      }
-    }
+    const { stepsByTrace } = await fetchStepsByTrace(traceIds, insights)
 
     /** Per-ticket solution-agent stats, keyed by reference number. Full step detail (and
      * therefore cost, which lives on nested spans) is only available for `detailedTickets`. */
@@ -445,6 +451,49 @@ app.get("/api/security-judge/:kind", async (req, res) => {
     })
   } catch (e) {
     console.error("[logfire] security judge examples query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/usage-runs", async (req, res) => {
+  try {
+    const env = resolveEnv(req)
+    const entityType = String(req.query.entityType ?? "none").replace(/'/g, "''")
+    const entityIdRaw = req.query.entityId
+    const entityId = entityIdRaw && entityIdRaw !== "null" ? String(entityIdRaw).replace(/'/g, "''") : null
+    const insights = { hoursBack: HOURS_BACK_INSIGHTS }
+
+    const entityIdFilter = entityId
+      ? `attributes->'context'->>'entity_id' = '${entityId}'`
+      : `attributes->'context'->>'entity_id' IS NULL`
+
+    const requestsResult = await logfireQuery(
+      `SELECT trace_id, start_timestamp, duration FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' AND COALESCE(attributes->'context'->>'entity_type', 'none') = '${entityType}' AND ${entityIdFilter} ORDER BY start_timestamp DESC LIMIT 20`,
+      insights,
+    )
+
+    const traceIds = requestsResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
+    const { stepsByTrace, exceptionTraces } = await fetchStepsByTrace(traceIds, insights)
+
+    const runs = requestsResult.data.map((row) => {
+      const steps = stepsByTrace.get(row.trace_id) ?? []
+      const outputSteps = steps.filter((s) => (s.type === "agent" || s.type === "chat") && s.output)
+      const solution = outputSteps.length > 0 ? outputSteps[outputSteps.length - 1].output : null
+      const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
+      return {
+        traceId: row.trace_id,
+        timestamp: row.start_timestamp,
+        outcome: exceptionTraces.has(row.trace_id) ? "exception" : "completed",
+        durationSec: row.duration ?? 0,
+        steps,
+        solution,
+        costUsd: costUsd > 0 ? costUsd : null,
+      }
+    })
+
+    res.json({ runs })
+  } catch (e) {
+    console.error("[logfire] usage runs query failed:", e.message)
     res.status(e.status ?? 502).json({ error: e.message })
   }
 })
