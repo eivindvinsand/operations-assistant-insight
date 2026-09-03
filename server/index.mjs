@@ -1,6 +1,7 @@
 import path from "node:path"
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
+import { connect } from "node:net"
 import express from "express"
 import { logfireQuery } from "./logfire.mjs"
 
@@ -423,6 +424,23 @@ app.get("/api/day-log", async (req, res) => {
     console.error("[logfire] day log query failed:", e.message)
     res.status(e.status ?? 502).json({ error: e.message })
   }
+})
+
+app.get("/api/dwh-test", (_req, res) => {
+  const host = "g-datascience-3.gamma.xcv.net"
+  const port = 1433
+  const socket = connect({ host, port, timeout: 5000 })
+  socket.once("connect", () => {
+    socket.destroy()
+    res.json({ reachable: true, host, port })
+  })
+  socket.once("timeout", () => {
+    socket.destroy()
+    res.json({ reachable: false, host, port, reason: "timeout" })
+  })
+  socket.once("error", (e) => {
+    res.json({ reachable: false, host, port, reason: e.message })
+  })
 })
 
 if (isProduction) {
