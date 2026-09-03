@@ -129,7 +129,7 @@ app.get("/api/dashboard", async (_req, res) => {
         today,
       ),
       logfireQuery(
-        "SELECT sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT) + CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as total_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd FROM records WHERE span_name = 'agent run'",
+        "SELECT sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT)) + COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT))) as total_tokens, sum(CAST(attributes->>'gen_ai.aggregated_usage.cache_read.input_tokens' AS BIGINT)) as cached_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent'",
         today,
       ),
       logfireQuery(
@@ -162,7 +162,7 @@ app.get("/api/dashboard", async (_req, res) => {
         insights,
       ),
       logfireQuery(
-        "SELECT attributes->>'model_name' as model, sum(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT)) as input_tokens, sum(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT)) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd, count(*) as calls FROM records WHERE span_name = 'agent run' GROUP BY 1 ORDER BY calls DESC LIMIT 8",
+        "SELECT attributes->>'model_name' as model, sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT))) as input_tokens, sum(COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT))) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd, count(*) as calls FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' GROUP BY 1 ORDER BY calls DESC LIMIT 8",
         insights,
       ),
       logfireQuery(
@@ -170,7 +170,7 @@ app.get("/api/dashboard", async (_req, res) => {
         insights,
       ),
       logfireQuery(
-        "SELECT date_trunc('day', start_timestamp) as day, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost FROM records WHERE span_name = 'agent run' GROUP BY 1 ORDER BY 1",
+        "SELECT date_trunc('day', start_timestamp) as day, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' GROUP BY 1 ORDER BY 1",
         insights,
       ),
     ])
@@ -248,7 +248,7 @@ app.get("/api/dashboard", async (_req, res) => {
 
     const responseTimeRow = responseTimeResult.data[0] ?? { median_dur: 0, avg_dur: 0 }
     const confidenceRow = confidenceResult.data[0] ?? { total: 0, high: 0 }
-    const tokensCostRow = tokensCostResult.data[0] ?? { total_tokens: 0, cost_usd: 0 }
+    const tokensCostRow = tokensCostResult.data[0] ?? { total_tokens: 0, cached_tokens: 0, cost_usd: 0 }
 
     res.json({
       totals: {
@@ -257,6 +257,7 @@ app.get("/api/dashboard", async (_req, res) => {
         highConfidencePct:
           confidenceRow.total > 0 ? (Number(confidenceRow.high) / Number(confidenceRow.total)) * 100 : null,
         tokensUsed: Number(tokensCostRow.total_tokens ?? 0),
+        cachedTokens: Number(tokensCostRow.cached_tokens ?? 0),
         costUsd: Number(tokensCostRow.cost_usd ?? 0),
       },
       context: contextResult.data.map((row) => ({ type: row.entity_type, count: Number(row.n ?? 0) })),

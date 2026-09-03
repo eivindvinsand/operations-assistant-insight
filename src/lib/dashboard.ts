@@ -26,6 +26,7 @@ export interface DashboardData {
     avgResponseTimeSec: number
     highConfidencePct: number | null
     tokensUsed: number
+    cachedTokens: number
     costUsd: number
   }
   context: { type: string; count: number }[]

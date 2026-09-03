@@ -473,7 +473,15 @@ function Dashboard() {
               avgSec={data.totals.avgResponseTimeSec}
             />
             <StatTile icon={faSackDollar} label="Cost (today)" value={preciseCostFormatter.format(data.totals.costUsd)} />
-            <StatTile icon={faCoins} label="Tokens used (today)" value={compactFormatter.format(data.totals.tokensUsed)} />
+            <StatTile
+              icon={faCoins}
+              label="Tokens used (today)"
+              value={
+                data.totals.cachedTokens > 0
+                  ? `${compactFormatter.format(data.totals.tokensUsed)} (${compactFormatter.format(data.totals.cachedTokens)} cached)`
+                  : compactFormatter.format(data.totals.tokensUsed)
+              }
+            />
             <StatTile
               icon={faBullseye}
               label="Avg. confidence (today)"
