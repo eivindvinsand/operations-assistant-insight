@@ -9,6 +9,12 @@ const distDir = path.join(__dirname, "..", "dist")
 const isProduction = existsSync(path.join(distDir, "index.html"))
 
 const app = express()
+
+// Live telemetry: never let a browser, proxy, or CDN cache these responses.
+app.use("/api", (_req, res, next) => {
+  res.set("Cache-Control", "no-store")
+  next()
+})
 const HOURS_BACK_ACTIVITY = 24
 const HOURS_BACK_INSIGHTS = 24 * 7
 const TRACE_ID_RE = /^[0-9a-f]{32}$/i

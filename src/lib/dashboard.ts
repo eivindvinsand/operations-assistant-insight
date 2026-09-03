@@ -67,7 +67,7 @@ export interface DashboardData {
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url)
+  const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(body.error ?? `Request failed (${res.status})`)
