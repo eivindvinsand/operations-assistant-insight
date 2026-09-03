@@ -34,6 +34,8 @@ export interface DashboardData {
     tokensUsed: number
     cachedTokens: number
     costUsd: number
+    uniqueUsers: number
+    uses: number
   }
   context: { type: string; count: number }[]
   dailyUsers: { day: string; users: number; messages: number }[]

@@ -123,6 +123,7 @@ app.get("/api/dashboard", async (req, res) => {
     const [
       responseTimeResult,
       tokensCostResult,
+      usageTodayResult,
       contextResult,
       dailyUsersResult,
       errorsTotalResult,
@@ -141,6 +142,10 @@ app.get("/api/dashboard", async (req, res) => {
       ),
       logfireQuery(
         `SELECT sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT)) + COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT))) as total_tokens, sum(CAST(attributes->>'gen_ai.aggregated_usage.cache_read.input_tokens' AS BIGINT)) as cached_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}'`,
+        today,
+      ),
+      logfireQuery(
+        `SELECT count(distinct attributes->>'anon_user_id') as users, count(*) as uses FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'`,
         today,
       ),
       logfireQuery(
@@ -259,6 +264,7 @@ app.get("/api/dashboard", async (req, res) => {
 
     const responseTimeRow = responseTimeResult.data[0] ?? { median_dur: 0, avg_dur: 0 }
     const tokensCostRow = tokensCostResult.data[0] ?? { total_tokens: 0, cached_tokens: 0, cost_usd: 0 }
+    const usageTodayRow = usageTodayResult.data[0] ?? { users: 0, uses: 0 }
 
     const solutionDurations = solutionRunsResult.data
       .map((row) => row.duration_s)
@@ -280,6 +286,8 @@ app.get("/api/dashboard", async (req, res) => {
         tokensUsed: Number(tokensCostRow.total_tokens ?? 0),
         cachedTokens: Number(tokensCostRow.cached_tokens ?? 0),
         costUsd: Number(tokensCostRow.cost_usd ?? 0),
+        uniqueUsers: Number(usageTodayRow.users ?? 0),
+        uses: Number(usageTodayRow.uses ?? 0),
       },
       context: contextResult.data.map((row) => ({ type: row.entity_type, count: Number(row.n ?? 0) })),
       dailyUsers: dailyUsersResult.data.map((row) => ({

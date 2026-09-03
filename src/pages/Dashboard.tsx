@@ -22,7 +22,6 @@ import {
   faCoins,
   faComments,
   faFlagCheckered,
-  faSackDollar,
   faStopwatch,
   faTriangleExclamation,
   faWrench,
@@ -229,44 +228,16 @@ function Markdown({ text }: { text: string }) {
   return <div className="bf-elements" dangerouslySetInnerHTML={{ __html: marked.parse(text, { async: false }) }} />
 }
 
-function StatTile({
-  icon,
+function DualValueTile({
   label,
-  value,
+  icon,
+  primary,
+  secondary,
 }: {
+  label: string
   icon: Parameters<typeof Icon>[0]['icon']
-  label: string
-  value: string
-}) {
-  return (
-    <Box padding radius background="base-2">
-      <Inline gap={12} align="center">
-        <Box
-          radius="full"
-          background="base"
-          style={{ width: 40, height: 40, display: 'grid', placeItems: 'center' }}
-        >
-          <Icon icon={icon} className="bfc-base-2 bf-large" />
-        </Box>
-        <Inline.Stretch>
-          <small className="bfc-base-2">{label}</small>
-          <h5 className="bf-h5">{value}</h5>
-        </Inline.Stretch>
-      </Inline>
-    </Box>
-  )
-}
-
-function ResponseTimeTile({
-  label,
-  icon,
-  medianSec,
-  avgSec,
-}: {
-  label: string
-  icon: typeof faStopwatch
-  medianSec: number
-  avgSec: number
+  primary: { value: string; caption: string }
+  secondary: { value: string; caption: string }
 }) {
   return (
     <Box padding radius background="base-2">
@@ -282,11 +253,12 @@ function ResponseTimeTile({
           <small className="bfc-base-2">{label}</small>
           <Inline gap={16} align="center">
             <span>
-              <span className="bf-h5">{formatDuration(medianSec)}</span>{' '}
-              <small className="bfc-base-2">median</small>
+              <span className="bf-h5">{primary.value}</span>{' '}
+              <small className="bfc-base-2">{primary.caption}</small>
             </span>
             <span>
-              <span className="bf-h5">{formatDuration(avgSec)}</span> <small className="bfc-base-2">avg</small>
+              <span className="bf-h5">{secondary.value}</span>{' '}
+              <small className="bfc-base-2">{secondary.caption}</small>
             </span>
           </Inline>
         </Inline.Stretch>
@@ -507,27 +479,35 @@ function Dashboard() {
       {data && (
         <Grid gap={24}>
           <Grid cols={1} small={2} large={4} gap={16}>
-            <ResponseTimeTile
+            <DualValueTile
               label="Response time (today)"
               icon={faStopwatch}
-              medianSec={data.totals.medianResponseTimeSec}
-              avgSec={data.totals.avgResponseTimeSec}
+              primary={{ value: formatDuration(data.totals.medianResponseTimeSec), caption: 'median' }}
+              secondary={{ value: formatDuration(data.totals.avgResponseTimeSec), caption: 'avg' }}
             />
-            <StatTile icon={faSackDollar} label="Cost (today)" value={preciseCostFormatter.format(data.totals.costUsd)} />
-            <StatTile
+            <DualValueTile
+              label="Cost & tokens (today)"
               icon={faCoins}
-              label="Tokens used (today)"
-              value={
-                data.totals.cachedTokens > 0
-                  ? `${compactFormatter.format(data.totals.tokensUsed)} (${compactFormatter.format(data.totals.cachedTokens)} cached)`
-                  : compactFormatter.format(data.totals.tokensUsed)
-              }
+              primary={{ value: preciseCostFormatter.format(data.totals.costUsd), caption: 'cost' }}
+              secondary={{
+                value: compactFormatter.format(data.totals.tokensUsed),
+                caption:
+                  data.totals.cachedTokens > 0
+                    ? `tokens (${compactFormatter.format(data.totals.cachedTokens)} cached)`
+                    : 'tokens',
+              }}
             />
-            <ResponseTimeTile
+            <DualValueTile
+              label="Usage (today)"
+              icon={faComments}
+              primary={{ value: compactFormatter.format(data.totals.uniqueUsers), caption: 'unique users' }}
+              secondary={{ value: compactFormatter.format(data.totals.uses), caption: 'uses' }}
+            />
+            <DualValueTile
               label="Solution agent response time (7d)"
               icon={faFlagCheckered}
-              medianSec={data.totals.solutionMedianResponseTimeSec}
-              avgSec={data.totals.solutionAvgResponseTimeSec}
+              primary={{ value: formatDuration(data.totals.solutionMedianResponseTimeSec), caption: 'median' }}
+              secondary={{ value: formatDuration(data.totals.solutionAvgResponseTimeSec), caption: 'avg' }}
             />
           </Grid>
 
