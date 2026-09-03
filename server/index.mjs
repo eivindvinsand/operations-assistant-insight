@@ -13,6 +13,15 @@ const HOURS_BACK_ACTIVITY = 24
 const HOURS_BACK_INSIGHTS = 24 * 7
 const TRACE_ID_RE = /^[0-9a-f]{32}$/i
 
+const ALLOWED_ENVIRONMENTS = new Set(["dev", "local", "prod", "test"])
+const DEFAULT_ENVIRONMENT = "prod"
+
+/** Reads ?env= from the request, falling back to prod for anything unrecognized. */
+function resolveEnv(req) {
+  const env = String(req.query.env ?? DEFAULT_ENVIRONMENT)
+  return ALLOWED_ENVIRONMENTS.has(env) ? env : DEFAULT_ENVIRONMENT
+}
+
 function levelLabel(level) {
   if (level == null) return "info"
   if (level >= 17) return "error"
@@ -97,8 +106,9 @@ function groupRunsByTicket(runRows) {
     .sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen))
 }
 
-app.get("/api/dashboard", async (_req, res) => {
+app.get("/api/dashboard", async (req, res) => {
   try {
+    const env = resolveEnv(req)
     const startOfToday = new Date()
     startOfToday.setUTCHours(0, 0, 0, 0)
     const today = { minTimestamp: startOfToday.toISOString() }
@@ -121,56 +131,56 @@ app.get("/api/dashboard", async (_req, res) => {
       dailyCostResult,
     ] = await Promise.all([
       logfireQuery(
-        "SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent'",
+        `SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}'`,
         today,
       ),
       logfireQuery(
-        "SELECT count(distinct trace_id) as total, count(distinct trace_id) FILTER (WHERE attributes->>'final_result' ILIKE '%HØY%') as high FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' ILIKE '%Konfidens%'",
+        `SELECT count(distinct trace_id) as total, count(distinct trace_id) FILTER (WHERE attributes->>'final_result' ILIKE '%HØY%') as high FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' ILIKE '%Konfidens%' AND deployment_environment = '${env}'`,
         today,
       ),
       logfireQuery(
-        "SELECT sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT)) + COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT))) as total_tokens, sum(CAST(attributes->>'gen_ai.aggregated_usage.cache_read.input_tokens' AS BIGINT)) as cached_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent'",
+        `SELECT sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT)) + COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT))) as total_tokens, sum(CAST(attributes->>'gen_ai.aggregated_usage.cache_read.input_tokens' AS BIGINT)) as cached_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}'`,
         today,
       ),
       logfireQuery(
-        "SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, count(*) as n FROM records WHERE span_name = 'chat.request' GROUP BY 1 ORDER BY n DESC",
+        `SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, count(*) as n FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC`,
         insights,
       ),
       logfireQuery(
-        "SELECT date_trunc('day', start_timestamp) as day, count(distinct attributes->>'anon_user_id') as users, count(*) as messages FROM records WHERE span_name = 'chat.request' GROUP BY 1 ORDER BY 1",
+        `SELECT date_trunc('day', start_timestamp) as day, count(distinct attributes->>'anon_user_id') as users, count(*) as messages FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY 1`,
         insights,
       ),
-      logfireQuery("SELECT count(*) as n FROM records WHERE level >= 17", insights),
+      logfireQuery(`SELECT count(*) as n FROM records WHERE level >= 17 AND deployment_environment = '${env}'`, insights),
       logfireQuery(
-        "SELECT COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) as kind, count(*) as n FROM records WHERE level >= 17 GROUP BY 1 ORDER BY n DESC LIMIT 6",
-        insights,
-      ),
-      logfireQuery(
-        `SELECT attributes->'logfire.logging_args'->>0 as tool, count(*) as n FROM records WHERE level >= 17 AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) GROUP BY 1 ORDER BY n DESC LIMIT 10`,
+        `SELECT COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) as kind, count(*) as n FROM records WHERE level >= 17 AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC LIMIT 6`,
         insights,
       ),
       logfireQuery(
-        "SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, attributes->'context'->>'entity_id' as entity_id, count(*) as n, max(start_timestamp) as last_seen FROM records WHERE span_name = 'chat.request' GROUP BY 1, 2 ORDER BY last_seen DESC LIMIT 100",
+        `SELECT attributes->'logfire.logging_args'->>0 as tool, count(*) as n FROM records WHERE level >= 17 AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC LIMIT 10`,
         insights,
       ),
       logfireQuery(
-        "SELECT start_timestamp, service_name, level, message FROM records ORDER BY start_timestamp DESC LIMIT 15",
+        `SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, attributes->'context'->>'entity_id' as entity_id, count(*) as n, max(start_timestamp) as last_seen FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' GROUP BY 1, 2 ORDER BY last_seen DESC LIMIT 100`,
+        insights,
+      ),
+      logfireQuery(
+        `SELECT start_timestamp, service_name, level, message FROM records WHERE deployment_environment = '${env}' ORDER BY start_timestamp DESC LIMIT 15`,
         activity,
       ),
       logfireQuery(
-        "SELECT attributes->>'gen_ai.tool.name' as tool, count(*) as n FROM records WHERE span_name = 'running tool' GROUP BY 1 ORDER BY n DESC LIMIT 10",
+        `SELECT attributes->>'gen_ai.tool.name' as tool, count(*) as n FROM records WHERE span_name = 'running tool' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC LIMIT 10`,
         insights,
       ),
       logfireQuery(
-        "SELECT attributes->>'model_name' as model, sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT))) as input_tokens, sum(COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT))) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd, count(*) as calls FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' GROUP BY 1 ORDER BY calls DESC LIMIT 8",
+        `SELECT attributes->>'model_name' as model, sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT))) as input_tokens, sum(COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT))) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd, count(*) as calls FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY calls DESC LIMIT 8`,
         insights,
       ),
       logfireQuery(
-        "SELECT trace_id, start_timestamp, attributes->>'reference_number' as ticket, attributes->>'outcome' as outcome, CAST(attributes->>'duration_s' AS DOUBLE) as duration_s FROM records WHERE span_name = 'solution_agent_finished' ORDER BY start_timestamp DESC LIMIT 200",
+        `SELECT trace_id, start_timestamp, attributes->>'reference_number' as ticket, attributes->>'outcome' as outcome, CAST(attributes->>'duration_s' AS DOUBLE) as duration_s FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' ORDER BY start_timestamp DESC LIMIT 200`,
         insights,
       ),
       logfireQuery(
-        "SELECT date_trunc('day', start_timestamp) as day, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' GROUP BY 1 ORDER BY 1",
+        `SELECT date_trunc('day', start_timestamp) as day, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY 1`,
         insights,
       ),
     ])
@@ -326,10 +336,11 @@ app.get("/api/dashboard", async (_req, res) => {
 
 app.get("/api/errors/:kind", async (req, res) => {
   try {
+    const env = resolveEnv(req)
     const kind = req.params.kind.replace(/'/g, "''")
     const insights = { hoursBack: HOURS_BACK_INSIGHTS }
     const result = await logfireQuery(
-      `SELECT start_timestamp, service_name, message, exception_message FROM records WHERE level >= 17 AND COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) = '${kind}' ORDER BY start_timestamp DESC LIMIT 15`,
+      `SELECT start_timestamp, service_name, message, exception_message FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) = '${kind}' ORDER BY start_timestamp DESC LIMIT 15`,
       insights,
     )
     res.json({
@@ -347,10 +358,11 @@ app.get("/api/errors/:kind", async (req, res) => {
 
 app.get("/api/tool-failures/:tool", async (req, res) => {
   try {
+    const env = resolveEnv(req)
     const tool = req.params.tool.replace(/'/g, "''")
     const insights = { hoursBack: HOURS_BACK_INSIGHTS }
     const result = await logfireQuery(
-      `SELECT start_timestamp, attributes->>'logfire.msg_template' as template, attributes->'logfire.logging_args'->>1 as detail FROM records WHERE level >= 17 AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) AND attributes->'logfire.logging_args'->>0 = '${tool}' ORDER BY start_timestamp DESC LIMIT 15`,
+      `SELECT start_timestamp, attributes->>'logfire.msg_template' as template, attributes->'logfire.logging_args'->>1 as detail FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) AND attributes->'logfire.logging_args'->>0 = '${tool}' ORDER BY start_timestamp DESC LIMIT 15`,
       insights,
     )
     res.json({
@@ -368,6 +380,7 @@ app.get("/api/tool-failures/:tool", async (req, res) => {
 
 app.get("/api/day-log", async (req, res) => {
   try {
+    const env = resolveEnv(req)
     const date = String(req.query.date ?? "")
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ error: "date must be YYYY-MM-DD" })
@@ -375,7 +388,7 @@ app.get("/api/day-log", async (req, res) => {
     const minTimestamp = `${date}T00:00:00.000Z`
     const maxTimestamp = new Date(new Date(minTimestamp).getTime() + 24 * 60 * 60 * 1000).toISOString()
     const result = await logfireQuery(
-      "SELECT start_timestamp, attributes->>'anon_user_id' as user_id, attributes->'context'->>'entity_type' as entity_type, attributes->'context'->>'entity_id' as entity_id, attributes->>'model' as model FROM records WHERE span_name = 'chat.request' ORDER BY start_timestamp DESC LIMIT 200",
+      `SELECT start_timestamp, attributes->>'anon_user_id' as user_id, attributes->'context'->>'entity_type' as entity_type, attributes->'context'->>'entity_id' as entity_id, attributes->>'model' as model FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' ORDER BY start_timestamp DESC LIMIT 200`,
       { minTimestamp, maxTimestamp },
     )
     res.json({

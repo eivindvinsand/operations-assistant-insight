@@ -2,6 +2,11 @@ export type DashboardLevel = 'debug' | 'info' | 'warning' | 'error'
 
 export type StepType = 'agent' | 'chat' | 'tool' | 'finish' | 'info'
 
+export type Environment = 'dev' | 'local' | 'prod' | 'test'
+
+export const ENVIRONMENTS: Environment[] = ['dev', 'local', 'prod', 'test']
+export const DEFAULT_ENVIRONMENT: Environment = 'prod'
+
 export interface RunStep {
   type: StepType
   label: string
@@ -61,13 +66,17 @@ export interface DashboardData {
   }[]
 }
 
-export async function fetchDashboard(): Promise<DashboardData> {
-  const res = await fetch('/api/dashboard')
+async function fetchJson<T>(url: string): Promise<T> {
+  const res = await fetch(url)
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(body.error ?? `Request failed (${res.status})`)
   }
   return res.json()
+}
+
+export async function fetchDashboard(env: Environment): Promise<DashboardData> {
+  return fetchJson(`/api/dashboard?env=${env}`)
 }
 
 export interface ErrorExample {
@@ -76,13 +85,11 @@ export interface ErrorExample {
   message: string
 }
 
-export async function fetchErrorExamples(kind: string): Promise<ErrorExample[]> {
-  const res = await fetch(`/api/errors/${encodeURIComponent(kind)}`)
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(body.error ?? `Request failed (${res.status})`)
-  }
-  return (await res.json()).examples
+export async function fetchErrorExamples(kind: string, env: Environment): Promise<ErrorExample[]> {
+  const body = await fetchJson<{ examples: ErrorExample[] }>(
+    `/api/errors/${encodeURIComponent(kind)}?env=${env}`,
+  )
+  return body.examples
 }
 
 export interface ToolFailureExample {
@@ -91,13 +98,11 @@ export interface ToolFailureExample {
   detail: string
 }
 
-export async function fetchToolFailureExamples(tool: string): Promise<ToolFailureExample[]> {
-  const res = await fetch(`/api/tool-failures/${encodeURIComponent(tool)}`)
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(body.error ?? `Request failed (${res.status})`)
-  }
-  return (await res.json()).examples
+export async function fetchToolFailureExamples(tool: string, env: Environment): Promise<ToolFailureExample[]> {
+  const body = await fetchJson<{ examples: ToolFailureExample[] }>(
+    `/api/tool-failures/${encodeURIComponent(tool)}?env=${env}`,
+  )
+  return body.examples
 }
 
 export interface DayLogEntry {
@@ -108,11 +113,9 @@ export interface DayLogEntry {
   model: string
 }
 
-export async function fetchDayLog(date: string): Promise<DayLogEntry[]> {
-  const res = await fetch(`/api/day-log?date=${encodeURIComponent(date)}`)
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(body.error ?? `Request failed (${res.status})`)
-  }
-  return (await res.json()).entries
+export async function fetchDayLog(date: string, env: Environment): Promise<DayLogEntry[]> {
+  const body = await fetchJson<{ entries: DayLogEntry[] }>(
+    `/api/day-log?date=${encodeURIComponent(date)}&env=${env}`,
+  )
+  return body.entries
 }

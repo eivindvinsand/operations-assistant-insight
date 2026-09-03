@@ -39,6 +39,8 @@ import Table from '@intility/bifrost-react/Table'
 import Accordion from '@intility/bifrost-react/Accordion'
 import Modal from '@intility/bifrost-react/Modal'
 import {
+  DEFAULT_ENVIRONMENT,
+  ENVIRONMENTS,
   fetchDashboard,
   fetchDayLog,
   fetchErrorExamples,
@@ -46,6 +48,7 @@ import {
   type DashboardData,
   type DashboardLevel,
   type DayLogEntry,
+  type Environment,
   type ErrorExample,
   type RunStep,
   type StepType,
@@ -389,37 +392,47 @@ function Dashboard() {
   const [toolFailureModal, setToolFailureModal] = useState<AsyncModalState<ToolFailureExample> | null>(null)
   const [dayLogModal, setDayLogModal] = useState<AsyncModalState<DayLogEntry> | null>(null)
   const [usageFilter, setUsageFilter] = useState<string>('all')
+  const [environment, setEnvironment] = useState<Environment>(DEFAULT_ENVIRONMENT)
 
-  const openErrorModal = useCallback((kind: string) => {
-    setErrorModal({ title: kind, items: null, loading: true, error: null })
-    fetchErrorExamples(kind)
-      .then((items) => setErrorModal({ title: kind, items, loading: false, error: null }))
-      .catch((e: Error) => setErrorModal({ title: kind, items: null, loading: false, error: e.message }))
-  }, [])
+  const openErrorModal = useCallback(
+    (kind: string) => {
+      setErrorModal({ title: kind, items: null, loading: true, error: null })
+      fetchErrorExamples(kind, environment)
+        .then((items) => setErrorModal({ title: kind, items, loading: false, error: null }))
+        .catch((e: Error) => setErrorModal({ title: kind, items: null, loading: false, error: e.message }))
+    },
+    [environment],
+  )
 
-  const openToolFailureModal = useCallback((tool: string) => {
-    setToolFailureModal({ title: tool, items: null, loading: true, error: null })
-    fetchToolFailureExamples(tool)
-      .then((items) => setToolFailureModal({ title: tool, items, loading: false, error: null }))
-      .catch((e: Error) => setToolFailureModal({ title: tool, items: null, loading: false, error: e.message }))
-  }, [])
+  const openToolFailureModal = useCallback(
+    (tool: string) => {
+      setToolFailureModal({ title: tool, items: null, loading: true, error: null })
+      fetchToolFailureExamples(tool, environment)
+        .then((items) => setToolFailureModal({ title: tool, items, loading: false, error: null }))
+        .catch((e: Error) => setToolFailureModal({ title: tool, items: null, loading: false, error: e.message }))
+    },
+    [environment],
+  )
 
-  const openDayLogModal = useCallback((dayIso: string) => {
-    const date = dayIso.slice(0, 10)
-    setDayLogModal({ title: date, items: null, loading: true, error: null })
-    fetchDayLog(date)
-      .then((items) => setDayLogModal({ title: date, items, loading: false, error: null }))
-      .catch((e: Error) => setDayLogModal({ title: date, items: null, loading: false, error: e.message }))
-  }, [])
+  const openDayLogModal = useCallback(
+    (dayIso: string) => {
+      const date = dayIso.slice(0, 10)
+      setDayLogModal({ title: date, items: null, loading: true, error: null })
+      fetchDayLog(date, environment)
+        .then((items) => setDayLogModal({ title: date, items, loading: false, error: null }))
+        .catch((e: Error) => setDayLogModal({ title: date, items: null, loading: false, error: e.message }))
+    },
+    [environment],
+  )
 
   const load = useCallback(() => {
     setLoading(true)
     setError(null)
-    fetchDashboard()
+    fetchDashboard(environment)
       .then(setData)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [])
+  }, [environment])
 
   useEffect(() => {
     load()
@@ -451,11 +464,18 @@ function Dashboard() {
 
   return (
     <div className="bf-page-padding">
-      <Inline align="center" style={{ marginBottom: 24 }}>
+      <Inline align="center" gap={12} style={{ marginBottom: 24, flexWrap: 'wrap' }}>
         <Inline.Stretch>
           <h1>Dashboard</h1>
           <p className="bfc-base-2">Live insight from Logfire</p>
         </Inline.Stretch>
+        <Button.Group>
+          {ENVIRONMENTS.map((env) => (
+            <Button key={env} active={environment === env} onClick={() => setEnvironment(env)}>
+              {env.charAt(0).toUpperCase() + env.slice(1)}
+            </Button>
+          ))}
+        </Button.Group>
         <Button onClick={load} disabled={loading}>
           <Icon icon={faArrowsRotate} marginRight />
           Refresh
