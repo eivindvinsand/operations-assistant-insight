@@ -41,6 +41,7 @@ export interface DashboardData {
   dailyUsers: { day: string; users: number; messages: number }[]
   errors: { total: number; byKind: { kind: string; count: number }[] }
   toolFailures: { tool: string; count: number }[]
+  securityJudge: { total: number; byKind: { kind: string; count: number }[] }
   tools: { tool: string; count: number }[]
   models: {
     model: string
@@ -104,6 +105,22 @@ export interface ToolFailureExample {
 export async function fetchToolFailureExamples(tool: string, env: Environment): Promise<ToolFailureExample[]> {
   const body = await fetchJson<{ examples: ToolFailureExample[] }>(
     `/api/tool-failures/${encodeURIComponent(tool)}?env=${env}`,
+  )
+  return body.examples
+}
+
+export interface SecurityJudgeExample {
+  time: string
+  ticketId: string | null
+  detail: string
+}
+
+export async function fetchSecurityJudgeExamples(
+  kind: string,
+  env: Environment,
+): Promise<SecurityJudgeExample[]> {
+  const body = await fetchJson<{ examples: SecurityJudgeExample[] }>(
+    `/api/security-judge/${encodeURIComponent(kind)}?env=${env}`,
   )
   return body.examples
 }

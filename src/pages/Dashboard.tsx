@@ -22,6 +22,7 @@ import {
   faCoins,
   faComments,
   faFlagCheckered,
+  faShieldHalved,
   faStopwatch,
   faTriangleExclamation,
   faWrench,
@@ -42,6 +43,7 @@ import {
   fetchDashboard,
   fetchDayLog,
   fetchErrorExamples,
+  fetchSecurityJudgeExamples,
   fetchToolFailureExamples,
   type DashboardData,
   type DashboardLevel,
@@ -49,6 +51,7 @@ import {
   type Environment,
   type ErrorExample,
   type RunStep,
+  type SecurityJudgeExample,
   type StepType,
   type TicketRun,
   type ToolFailureExample,
@@ -371,6 +374,7 @@ function Dashboard() {
 
   const [errorModal, setErrorModal] = useState<AsyncModalState<ErrorExample> | null>(null)
   const [toolFailureModal, setToolFailureModal] = useState<AsyncModalState<ToolFailureExample> | null>(null)
+  const [securityJudgeModal, setSecurityJudgeModal] = useState<AsyncModalState<SecurityJudgeExample> | null>(null)
   const [dayLogModal, setDayLogModal] = useState<AsyncModalState<DayLogEntry> | null>(null)
   const [usageFilter, setUsageFilter] = useState<string>('all')
   const [environment, setEnvironment] = useState<Environment>(DEFAULT_ENVIRONMENT)
@@ -391,6 +395,16 @@ function Dashboard() {
       fetchToolFailureExamples(tool, environment)
         .then((items) => setToolFailureModal({ title: tool, items, loading: false, error: null }))
         .catch((e: Error) => setToolFailureModal({ title: tool, items: null, loading: false, error: e.message }))
+    },
+    [environment],
+  )
+
+  const openSecurityJudgeModal = useCallback(
+    (kind: string) => {
+      setSecurityJudgeModal({ title: kind, items: null, loading: true, error: null })
+      fetchSecurityJudgeExamples(kind, environment)
+        .then((items) => setSecurityJudgeModal({ title: kind, items, loading: false, error: null }))
+        .catch((e: Error) => setSecurityJudgeModal({ title: kind, items: null, loading: false, error: e.message }))
     },
     [environment],
   )
@@ -784,7 +798,7 @@ function Dashboard() {
             )}
           </SectionBox>
 
-          <Grid cols={1} large={2} gap={24}>
+          <Grid cols={1} large={3} gap={24}>
             <SectionBox title="Errors (7d)">
               <Inline align="center" gap={12} style={{ marginBottom: data.errors.byKind.length > 0 ? 16 : 0 }}>
                 <Icon icon={faTriangleExclamation} className="bfc-alert bf-large" />
@@ -807,6 +821,27 @@ function Dashboard() {
                 <BreakdownBars
                   items={data.toolFailures.map((t) => ({ label: t.tool, count: t.count }))}
                   onSelect={openToolFailureModal}
+                />
+              )}
+            </SectionBox>
+
+            <SectionBox title="Security judge blocks (7d)">
+              <Inline
+                align="center"
+                gap={12}
+                style={{ marginBottom: data.securityJudge.byKind.length > 0 ? 16 : 0 }}
+              >
+                <Icon icon={faShieldHalved} className="bfc-alert bf-large" />
+                <span className="bf-h5">{compactFormatter.format(data.securityJudge.total)} blocked</span>
+              </Inline>
+              {data.securityJudge.byKind.length === 0 ? (
+                <Message state="neutral" noIcon>
+                  No blocks recorded.
+                </Message>
+              ) : (
+                <BreakdownBars
+                  items={data.securityJudge.byKind.map((k) => ({ label: k.kind, count: k.count }))}
+                  onSelect={openSecurityJudgeModal}
                 />
               )}
             </SectionBox>
@@ -918,6 +953,45 @@ function Dashboard() {
                     <Badge state={t.kind === 'timeout' ? 'warning' : 'alert'}>{t.kind}</Badge>
                   </Table.Cell>
                   <Table.Cell style={{ wordBreak: 'break-word' }}>{t.detail}</Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={securityJudgeModal != null}
+        onRequestClose={() => setSecurityJudgeModal(null)}
+        header={securityJudgeModal?.title}
+        width={700}
+      >
+        {securityJudgeModal?.loading && (
+          <Inline align="center" gap={8}>
+            <Icon.Spinner size={20} />
+            <span>Loading examples …</span>
+          </Inline>
+        )}
+        {securityJudgeModal?.error && (
+          <Message state="alert" noIcon>
+            {securityJudgeModal.error}
+          </Message>
+        )}
+        {securityJudgeModal?.items && (
+          <Table>
+            <Table.Header>
+              <Table.Row>
+                <Table.HeaderCell>Time</Table.HeaderCell>
+                <Table.HeaderCell>Ticket</Table.HeaderCell>
+                <Table.HeaderCell>Detail</Table.HeaderCell>
+              </Table.Row>
+            </Table.Header>
+            <Table.Body>
+              {securityJudgeModal.items.map((s, i) => (
+                <Table.Row key={i}>
+                  <Table.Cell>{timeFormatter.format(new Date(s.time))}</Table.Cell>
+                  <Table.Cell>{s.ticketId ?? '—'}</Table.Cell>
+                  <Table.Cell style={{ wordBreak: 'break-word' }}>{s.detail}</Table.Cell>
                 </Table.Row>
               ))}
             </Table.Body>

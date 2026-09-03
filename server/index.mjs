@@ -46,6 +46,19 @@ const SKIPPED_SPANS = new Set(["POST /api/v2/chat", "OPTIONS /api/v2/chat", "cha
 const TOOL_FAILURE_TEMPLATES = ["MCP tool %s raised exception: %s", "MCP tool %s timed out after %ds"]
 const TOOL_FAILURE_TEMPLATE_LIST = TOOL_FAILURE_TEMPLATES.map((t) => `'${t}'`).join(",")
 
+/** Canonical LLM Judge block events, keyed by dashboard label. Each block is logged twice under
+ * different span names within the same trace (a generic line plus a shorter duplicate) — only the
+ * generic span names are counted here to avoid double-counting the same block. */
+const SECURITY_JUDGE_KINDS = {
+  "Blocked user input": "LLM Judge flagged input",
+  "Blocked tool output": "LLM Judge flagged tool output",
+  "Blocked MCP tool result": "LLM Judge blocked output from MCP tool %s",
+}
+const SECURITY_JUDGE_SPAN_LIST = sqlList(Object.values(SECURITY_JUDGE_KINDS))
+const SECURITY_JUDGE_LABELS = Object.fromEntries(
+  Object.entries(SECURITY_JUDGE_KINDS).map(([label, spanName]) => [spanName, label]),
+)
+
 /** Extracts assistant text from a chat span's gen_ai.output.messages attribute. */
 function extractChatOutput(attributes) {
   const messages = attributes?.["gen_ai.output.messages"]
@@ -130,6 +143,7 @@ app.get("/api/dashboard", async (req, res) => {
       errorsTotalResult,
       errorKindsResult,
       toolFailuresResult,
+      securityJudgeResult,
       usageResult,
       recentResult,
       toolsResult,
@@ -164,6 +178,10 @@ app.get("/api/dashboard", async (req, res) => {
       ),
       logfireQuery(
         `SELECT attributes->'logfire.logging_args'->>0 as tool, count(*) as n FROM records WHERE level >= 17 AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC LIMIT 10`,
+        insights,
+      ),
+      logfireQuery(
+        `SELECT span_name, count(*) as n FROM records WHERE span_name IN (${SECURITY_JUDGE_SPAN_LIST}) AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC`,
         insights,
       ),
       logfireQuery(
@@ -305,6 +323,13 @@ app.get("/api/dashboard", async (req, res) => {
       toolFailures: toolFailuresResult.data
         .filter((row) => row.tool)
         .map((row) => ({ tool: row.tool, count: Number(row.n ?? 0) })),
+      securityJudge: {
+        total: securityJudgeResult.data.reduce((sum, row) => sum + Number(row.n ?? 0), 0),
+        byKind: securityJudgeResult.data.map((row) => ({
+          kind: SECURITY_JUDGE_LABELS[row.span_name] ?? row.span_name,
+          count: Number(row.n ?? 0),
+        })),
+      },
       tools: toolsResult.data
         .filter((row) => row.tool)
         .map((row) => ({ tool: row.tool, count: Number(row.n ?? 0) })),
@@ -394,6 +419,32 @@ app.get("/api/tool-failures/:tool", async (req, res) => {
     })
   } catch (e) {
     console.error("[logfire] tool failure examples query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/security-judge/:kind", async (req, res) => {
+  try {
+    const env = resolveEnv(req)
+    const spanName = SECURITY_JUDGE_KINDS[req.params.kind]
+    if (!spanName) return res.status(404).json({ error: "unknown kind" })
+    const insights = { hoursBack: HOURS_BACK_INSIGHTS }
+    const result = await logfireQuery(
+      `SELECT start_timestamp, attributes->>'ticket_id' as ticket_id, attributes->>'flagged_content' as flagged_content, attributes->'logfire.logging_args'->>0 as tool_name FROM records WHERE span_name = '${spanName.replace(/'/g, "''")}' AND deployment_environment = '${env}' ORDER BY start_timestamp DESC LIMIT 15`,
+      insights,
+    )
+    res.json({
+      examples: result.data.map((row) => {
+        const content = row.flagged_content ?? (row.tool_name ? `Tool: ${row.tool_name}` : "")
+        return {
+          time: row.start_timestamp,
+          ticketId: row.ticket_id && row.ticket_id !== "-" ? row.ticket_id : null,
+          detail: content.length > 300 ? `${content.slice(0, 300)}…` : content,
+        }
+      }),
+    })
+  } catch (e) {
+    console.error("[logfire] security judge examples query failed:", e.message)
     res.status(e.status ?? 502).json({ error: e.message })
   }
 })
