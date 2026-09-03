@@ -29,7 +29,8 @@ export interface DashboardData {
   totals: {
     medianResponseTimeSec: number
     avgResponseTimeSec: number
-    highConfidencePct: number | null
+    solutionMedianResponseTimeSec: number
+    solutionAvgResponseTimeSec: number
     tokensUsed: number
     cachedTokens: number
     costUsd: number

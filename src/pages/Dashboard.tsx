@@ -18,7 +18,6 @@ import {
 import {
   faArrowsRotate,
   faBrain,
-  faBullseye,
   faCircleInfo,
   faCoins,
   faComments,
@@ -258,7 +257,17 @@ function StatTile({
   )
 }
 
-function ResponseTimeTile({ medianSec, avgSec }: { medianSec: number; avgSec: number }) {
+function ResponseTimeTile({
+  label,
+  icon,
+  medianSec,
+  avgSec,
+}: {
+  label: string
+  icon: typeof faStopwatch
+  medianSec: number
+  avgSec: number
+}) {
   return (
     <Box padding radius background="base-2">
       <Inline gap={12} align="center">
@@ -267,10 +276,10 @@ function ResponseTimeTile({ medianSec, avgSec }: { medianSec: number; avgSec: nu
           background="base"
           style={{ width: 40, height: 40, display: 'grid', placeItems: 'center' }}
         >
-          <Icon icon={faStopwatch} className="bfc-base-2 bf-large" />
+          <Icon icon={icon} className="bfc-base-2 bf-large" />
         </Box>
         <Inline.Stretch>
-          <small className="bfc-base-2">Response time (today)</small>
+          <small className="bfc-base-2">{label}</small>
           <Inline gap={16} align="center">
             <span>
               <span className="bf-h5">{formatDuration(medianSec)}</span>{' '}
@@ -499,6 +508,8 @@ function Dashboard() {
         <Grid gap={24}>
           <Grid cols={1} small={2} large={4} gap={16}>
             <ResponseTimeTile
+              label="Response time (today)"
+              icon={faStopwatch}
               medianSec={data.totals.medianResponseTimeSec}
               avgSec={data.totals.avgResponseTimeSec}
             />
@@ -512,10 +523,11 @@ function Dashboard() {
                   : compactFormatter.format(data.totals.tokensUsed)
               }
             />
-            <StatTile
-              icon={faBullseye}
-              label="Avg. confidence (today)"
-              value={data.totals.highConfidencePct != null ? `${Math.round(data.totals.highConfidencePct)}%` : '—'}
+            <ResponseTimeTile
+              label="Solution agent response time (7d)"
+              icon={faFlagCheckered}
+              medianSec={data.totals.solutionMedianResponseTimeSec}
+              avgSec={data.totals.solutionAvgResponseTimeSec}
             />
           </Grid>
 

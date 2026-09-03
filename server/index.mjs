@@ -122,7 +122,6 @@ app.get("/api/dashboard", async (req, res) => {
     const insights = { hoursBack: HOURS_BACK_INSIGHTS }
     const [
       responseTimeResult,
-      confidenceResult,
       tokensCostResult,
       contextResult,
       dailyUsersResult,
@@ -138,10 +137,6 @@ app.get("/api/dashboard", async (req, res) => {
     ] = await Promise.all([
       logfireQuery(
         `SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}'`,
-        today,
-      ),
-      logfireQuery(
-        `SELECT count(distinct trace_id) as total, count(distinct trace_id) FILTER (WHERE attributes->>'final_result' ILIKE '%HØY%') as high FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' ILIKE '%Konfidens%' AND deployment_environment = '${env}'`,
         today,
       ),
       logfireQuery(
@@ -263,15 +258,25 @@ app.get("/api/dashboard", async (req, res) => {
     }
 
     const responseTimeRow = responseTimeResult.data[0] ?? { median_dur: 0, avg_dur: 0 }
-    const confidenceRow = confidenceResult.data[0] ?? { total: 0, high: 0 }
     const tokensCostRow = tokensCostResult.data[0] ?? { total_tokens: 0, cached_tokens: 0, cost_usd: 0 }
+
+    const solutionDurations = solutionRunsResult.data
+      .map((row) => row.duration_s)
+      .filter((d) => typeof d === "number" && !Number.isNaN(d))
+      .sort((a, b) => a - b)
+    const solutionMedianResponseTimeSec =
+      solutionDurations.length > 0 ? solutionDurations[Math.floor(solutionDurations.length / 2)] : 0
+    const solutionAvgResponseTimeSec =
+      solutionDurations.length > 0
+        ? solutionDurations.reduce((sum, d) => sum + d, 0) / solutionDurations.length
+        : 0
 
     res.json({
       totals: {
         medianResponseTimeSec: Number(responseTimeRow.median_dur ?? 0),
         avgResponseTimeSec: Number(responseTimeRow.avg_dur ?? 0),
-        highConfidencePct:
-          confidenceRow.total > 0 ? (Number(confidenceRow.high) / Number(confidenceRow.total)) * 100 : null,
+        solutionMedianResponseTimeSec: Number(solutionMedianResponseTimeSec ?? 0),
+        solutionAvgResponseTimeSec: Number(solutionAvgResponseTimeSec ?? 0),
         tokensUsed: Number(tokensCostRow.total_tokens ?? 0),
         cachedTokens: Number(tokensCostRow.cached_tokens ?? 0),
         costUsd: Number(tokensCostRow.cost_usd ?? 0),
