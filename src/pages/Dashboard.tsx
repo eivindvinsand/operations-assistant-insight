@@ -19,9 +19,11 @@ import {
   faArrowsRotate,
   faBrain,
   faCircleInfo,
+  faClock,
   faCoins,
   faComments,
   faFlagCheckered,
+  faMagnifyingGlass,
   faShieldHalved,
   faStopwatch,
   faTriangleExclamation,
@@ -37,6 +39,9 @@ import Message from '@intility/bifrost-react/Message'
 import Table from '@intility/bifrost-react/Table'
 import Accordion from '@intility/bifrost-react/Accordion'
 import Modal from '@intility/bifrost-react/Modal'
+import Dropdown from '@intility/bifrost-react/Dropdown'
+import Input from '@intility/bifrost-react/Input'
+import Pagination from '@intility/bifrost-react/Pagination'
 import {
   DEFAULT_ENVIRONMENT,
   ENVIRONMENTS,
@@ -54,6 +59,7 @@ import {
   type RunStep,
   type SecurityJudgeExample,
   type StepType,
+  type TimeRange,
   type TicketRun,
   type ToolFailureExample,
 } from '../lib/dashboard'
@@ -96,6 +102,115 @@ const timeFormatter = new Intl.DateTimeFormat('en-US', {
   dateStyle: 'short',
   timeStyle: 'medium',
 })
+
+interface TimeRangePreset {
+  label: string
+  minutesBack: number
+}
+
+const TIME_PRESETS: TimeRangePreset[] = [
+  { label: 'Last 5 minutes', minutesBack: 5 },
+  { label: 'Last 15 minutes', minutesBack: 15 },
+  { label: 'Last hour', minutesBack: 60 },
+  { label: 'Last 24 hours', minutesBack: 60 * 24 },
+  { label: 'Last 7 days', minutesBack: 60 * 24 * 7 },
+]
+
+function presetRange(minutesBack: number): TimeRange {
+  const max = new Date()
+  const min = new Date(max.getTime() - minutesBack * 60 * 1000)
+  return { minTimestamp: min.toISOString(), maxTimestamp: max.toISOString() }
+}
+
+const DEFAULT_TIME_RANGE = presetRange(60 * 24)
+
+function toLocalInputValue(iso: string): string {
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function fromLocalInputValue(value: string): string {
+  return new Date(value).toISOString()
+}
+
+const rangeFormatter = new Intl.DateTimeFormat('en-US', { dateStyle: 'short', timeStyle: 'short' })
+
+function formatRangeLabel(range: TimeRange, activePresetLabel: string | null): string {
+  if (activePresetLabel) return activePresetLabel
+  return `${rangeFormatter.format(new Date(range.minTimestamp))} – ${rangeFormatter.format(new Date(range.maxTimestamp))}`
+}
+
+function TimeRangePicker({ value, onChange }: { value: TimeRange; onChange: (range: TimeRange) => void }) {
+  const [activePreset, setActivePreset] = useState<string | null>('Last 24 hours')
+  const [customFrom, setCustomFrom] = useState(() => toLocalInputValue(value.minTimestamp))
+  const [customTo, setCustomTo] = useState(() => toLocalInputValue(value.maxTimestamp))
+
+  const applyPreset = (preset: TimeRangePreset) => {
+    const range = presetRange(preset.minutesBack)
+    onChange(range)
+    setActivePreset(preset.label)
+    setCustomFrom(toLocalInputValue(range.minTimestamp))
+    setCustomTo(toLocalInputValue(range.maxTimestamp))
+  }
+
+  const applyCustom = () => {
+    if (!customFrom || !customTo) return
+    const minTimestamp = fromLocalInputValue(customFrom)
+    const maxTimestamp = fromLocalInputValue(customTo)
+    if (new Date(minTimestamp) >= new Date(maxTimestamp)) return
+    onChange({ minTimestamp, maxTimestamp })
+    setActivePreset(null)
+  }
+
+  return (
+    <Dropdown
+      placement="bottom-end"
+      content={
+        <Box padding style={{ minWidth: 260 }}>
+          <Grid gap={4} style={{ marginBottom: 12 }}>
+            {TIME_PRESETS.map((preset) => (
+              <Button
+                key={preset.label}
+                variant={activePreset === preset.label ? 'filled' : 'flat'}
+                style={{ textAlign: 'left', fontWeight: 'normal', justifyContent: 'flex-start' }}
+                onClick={() => applyPreset(preset)}
+              >
+                {preset.label}
+              </Button>
+            ))}
+          </Grid>
+          <hr />
+          <Grid gap={8} style={{ marginTop: 12 }}>
+            <small className="bfc-base-2">Custom range</small>
+            <Input
+              label="From"
+              type="datetime-local"
+              small
+              value={customFrom}
+              onChange={(e) => setCustomFrom(e.target.value)}
+            />
+            <Input
+              label="To"
+              type="datetime-local"
+              small
+              value={customTo}
+              onChange={(e) => setCustomTo(e.target.value)}
+            />
+            <Button small onClick={applyCustom}>
+              Apply
+            </Button>
+          </Grid>
+        </Box>
+      }
+    >
+      <Button>
+        <Icon icon={faClock} marginRight />
+        {formatRangeLabel(value, activePreset)}
+      </Button>
+    </Dropdown>
+  )
+}
 
 const compactFormatter = new Intl.NumberFormat('en-US', { notation: 'compact' })
 
@@ -454,38 +569,41 @@ function Dashboard() {
   const [securityJudgeModal, setSecurityJudgeModal] = useState<AsyncModalState<SecurityJudgeExample> | null>(null)
   const [dayLogModal, setDayLogModal] = useState<AsyncModalState<DayLogEntry> | null>(null)
   const [usageFilter, setUsageFilter] = useState<string>('all')
+  const [usageSearch, setUsageSearch] = useState('')
+  const [usagePage, setUsagePage] = useState(1)
   const [usageRunsByKey, setUsageRunsByKey] = useState<Record<string, UsageRunsState>>({})
   const loadedUsageKeys = useRef(new Set<string>())
   const [environment, setEnvironment] = useState<Environment>(DEFAULT_ENVIRONMENT)
+  const [timeRange, setTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE)
 
   const openErrorModal = useCallback(
     (kind: string) => {
       setErrorModal({ title: kind, items: null, loading: true, error: null })
-      fetchErrorExamples(kind, environment)
+      fetchErrorExamples(kind, environment, timeRange)
         .then((items) => setErrorModal({ title: kind, items, loading: false, error: null }))
         .catch((e: Error) => setErrorModal({ title: kind, items: null, loading: false, error: e.message }))
     },
-    [environment],
+    [environment, timeRange],
   )
 
   const openToolFailureModal = useCallback(
     (tool: string, category: 'agent' | 'direct') => {
       setToolFailureModal({ title: tool, items: null, loading: true, error: null })
-      fetchToolFailureExamples(tool, category, environment)
+      fetchToolFailureExamples(tool, category, environment, timeRange)
         .then((items) => setToolFailureModal({ title: tool, items, loading: false, error: null }))
         .catch((e: Error) => setToolFailureModal({ title: tool, items: null, loading: false, error: e.message }))
     },
-    [environment],
+    [environment, timeRange],
   )
 
   const openSecurityJudgeModal = useCallback(
     (kind: string) => {
       setSecurityJudgeModal({ title: kind, items: null, loading: true, error: null })
-      fetchSecurityJudgeExamples(kind, environment)
+      fetchSecurityJudgeExamples(kind, environment, timeRange)
         .then((items) => setSecurityJudgeModal({ title: kind, items, loading: false, error: null }))
         .catch((e: Error) => setSecurityJudgeModal({ title: kind, items: null, loading: false, error: e.message }))
     },
-    [environment],
+    [environment, timeRange],
   )
 
   const loadUsageRuns = useCallback(
@@ -494,13 +612,13 @@ function Dashboard() {
       if (loadedUsageKeys.current.has(key)) return
       loadedUsageKeys.current.add(key)
       setUsageRunsByKey((prev) => ({ ...prev, [key]: { items: null, loading: true, error: null } }))
-      fetchUsageRuns(entityType, entityId, environment)
+      fetchUsageRuns(entityType, entityId, environment, timeRange)
         .then((items) => setUsageRunsByKey((prev) => ({ ...prev, [key]: { items, loading: false, error: null } })))
         .catch((e: Error) =>
           setUsageRunsByKey((prev) => ({ ...prev, [key]: { items: null, loading: false, error: e.message } })),
         )
     },
-    [environment],
+    [environment, timeRange],
   )
 
   const openDayLogModal = useCallback(
@@ -519,11 +637,11 @@ function Dashboard() {
     setError(null)
     loadedUsageKeys.current.clear()
     setUsageRunsByKey({})
-    fetchDashboard(environment)
+    fetchDashboard(environment, timeRange)
       .then(setData)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [environment])
+  }, [environment, timeRange])
 
   useEffect(() => {
     load()
@@ -550,10 +668,18 @@ function Dashboard() {
     label: c.type === 'none' ? 'No context' : c.type.charAt(0).toUpperCase() + c.type.slice(1),
   }))
 
+  const USAGE_PAGE_SIZE = 10
   const usageTypes = [...new Set((data?.usage ?? []).map((u) => u.entityType))]
+  const usageSearchLower = usageSearch.trim().toLowerCase()
   const filteredUsage = (data?.usage ?? []).filter(
-    (u) => usageFilter === 'all' || u.entityType === usageFilter,
+    (u) =>
+      (usageFilter === 'all' || u.entityType === usageFilter) &&
+      (usageSearchLower === '' ||
+        (u.entityId ?? '').toLowerCase().includes(usageSearchLower) ||
+        (u.model ?? '').toLowerCase().includes(usageSearchLower)),
   )
+  const usageTotalPages = Math.max(1, Math.ceil(filteredUsage.length / USAGE_PAGE_SIZE))
+  const pagedUsage = filteredUsage.slice((usagePage - 1) * USAGE_PAGE_SIZE, usagePage * USAGE_PAGE_SIZE)
 
   return (
     <div className="bf-page-padding">
@@ -569,6 +695,7 @@ function Dashboard() {
             </Button>
           ))}
         </Button.Group>
+        <TimeRangePicker value={timeRange} onChange={setTimeRange} />
         <Button onClick={load} disabled={loading}>
           <Icon icon={faArrowsRotate} marginRight />
           Refresh
@@ -592,13 +719,13 @@ function Dashboard() {
         <Grid gap={24}>
           <Grid cols={1} small={2} large={4} gap={16}>
             <DualValueTile
-              label="Response time (today)"
+              label="Response time"
               icon={faStopwatch}
               primary={{ value: formatDuration(data.totals.medianResponseTimeSec), caption: 'median' }}
               secondary={{ value: formatDuration(data.totals.avgResponseTimeSec), caption: 'avg' }}
             />
             <DualValueTile
-              label="Cost & tokens (today)"
+              label="Cost & tokens"
               icon={faCoins}
               primary={{ value: preciseCostFormatter.format(data.totals.costUsd), caption: 'cost' }}
               secondary={{
@@ -610,20 +737,20 @@ function Dashboard() {
               }}
             />
             <DualValueTile
-              label="Usage (today)"
+              label="Usage"
               icon={faComments}
               primary={{ value: compactFormatter.format(data.totals.uniqueUsers), caption: 'unique users' }}
               secondary={{ value: compactFormatter.format(data.totals.uses), caption: 'uses' }}
             />
             <DualValueTile
-              label="Solution agent response time (7d)"
+              label="Solution agent response time"
               icon={faFlagCheckered}
               primary={{ value: formatDuration(data.totals.solutionMedianResponseTimeSec), caption: 'median' }}
               secondary={{ value: formatDuration(data.totals.solutionAvgResponseTimeSec), caption: 'avg' }}
             />
           </Grid>
 
-          <SectionBox title="LLM cost per day (7d)">
+          <SectionBox title="LLM cost per day">
             {dailyCostData.length === 0 ? (
               <Message state="neutral" noIcon>
                 No priced LLM calls recorded yet.
@@ -662,7 +789,7 @@ function Dashboard() {
           </SectionBox>
 
           <Grid cols={1} large={2} gap={24}>
-            <SectionBox title="Daily active users (7d)">
+            <SectionBox title="Daily active users">
               {dailyUsersData.length > 0 && (
                 <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
                   Click a bar to see that day's log
@@ -700,7 +827,7 @@ function Dashboard() {
               )}
             </SectionBox>
 
-            <SectionBox title="Agent usage by context (7d)">
+            <SectionBox title="Agent usage by context">
               {contextData.length === 0 ? (
                 <Message state="neutral" noIcon>
                   No context data recorded yet.
@@ -734,7 +861,7 @@ function Dashboard() {
           </Grid>
 
           <Grid cols={1} large={2} gap={24}>
-            <SectionBox title="LLM cost & tokens per model (7d)">
+            <SectionBox title="LLM cost & tokens per model">
               {costData.length === 0 ? (
                 <Message state="neutral" noIcon>
                   Logfire has no pricing data for the models used yet (self-hosted/internal
@@ -766,7 +893,7 @@ function Dashboard() {
               )}
             </SectionBox>
 
-            <SectionBox title="Most used tools (7d)">
+            <SectionBox title="Most used tools">
               {toolData.length === 0 ? (
                 <Message state="neutral" noIcon>
                   No tool calls recorded yet.
@@ -793,7 +920,7 @@ function Dashboard() {
           </Grid>
 
           <Grid cols={1} large={3} gap={24}>
-            <SectionBox title="Errors (7d)">
+            <SectionBox title="Errors">
               <Inline align="center" gap={12} style={{ marginBottom: data.errors.byKind.length > 0 ? 16 : 0 }}>
                 <Icon icon={faTriangleExclamation} className="bfc-alert bf-large" />
                 <span className="bf-h5">{compactFormatter.format(data.errors.total)} errors</span>
@@ -806,7 +933,7 @@ function Dashboard() {
               )}
             </SectionBox>
 
-            <SectionBox title="Tool call failures (7d)">
+            <SectionBox title="Tool call failures">
               <Button.Group style={{ marginBottom: 16 }}>
                 <Button active={toolFailureCategory === 'agent'} onClick={() => setToolFailureCategory('agent')}>
                   Agent tool calls ({agentToolFailures.length})
@@ -829,7 +956,7 @@ function Dashboard() {
               )}
             </SectionBox>
 
-            <SectionBox title="Security judge blocks (7d)">
+            <SectionBox title="Security judge blocks">
               <Inline
                 align="center"
                 gap={12}
@@ -851,26 +978,54 @@ function Dashboard() {
             </SectionBox>
           </Grid>
 
-          <SectionBox title="Usage log (7d)">
+          <SectionBox title="Usage log">
             <Inline align="center" gap={8} style={{ marginBottom: 16, flexWrap: 'wrap' }}>
               <Button.Group>
-                <Button active={usageFilter === 'all'} onClick={() => setUsageFilter('all')}>
+                <Button
+                  active={usageFilter === 'all'}
+                  onClick={() => {
+                    setUsageFilter('all')
+                    setUsagePage(1)
+                  }}
+                >
                   All ({data.usage.length})
                 </Button>
                 {usageTypes.map((type) => (
-                  <Button key={type} active={usageFilter === type} onClick={() => setUsageFilter(type)}>
+                  <Button
+                    key={type}
+                    active={usageFilter === type}
+                    onClick={() => {
+                      setUsageFilter(type)
+                      setUsagePage(1)
+                    }}
+                  >
                     {type === 'none' ? 'No context' : type.charAt(0).toUpperCase() + type.slice(1)} (
                     {data.usage.filter((u) => u.entityType === type).length})
                   </Button>
                 ))}
               </Button.Group>
+              <Input
+                label="Search usage log"
+                hideLabel
+                small
+                clearable
+                icon={faMagnifyingGlass}
+                placeholder="Search by reference or model…"
+                value={usageSearch}
+                onChange={(e) => {
+                  setUsageSearch(e.target.value)
+                  setUsagePage(1)
+                }}
+                style={{ minWidth: 240 }}
+              />
             </Inline>
             {filteredUsage.length === 0 ? (
               <Message state="neutral" noIcon>
                 No usage recorded for this filter yet.
               </Message>
             ) : (
-              <Table key={usageFilter}>
+              <Grid gap={16}>
+                <Table key={`${usageFilter}-${usageSearchLower}-${usagePage}`}>
                 <Table.Header>
                   <Table.Row>
                     <Table.HeaderCell></Table.HeaderCell>
@@ -887,7 +1042,7 @@ function Dashboard() {
                   </Table.Row>
                 </Table.Header>
                 <Table.Body>
-                  {filteredUsage.map((row) => {
+                  {pagedUsage.map((row) => {
                     const link = entityLink(row.entityType, row.entityId)
                     const usageKey = `${row.entityType}-${row.entityId ?? 'none'}`
                     return (
@@ -939,10 +1094,16 @@ function Dashboard() {
                   })}
                 </Table.Body>
               </Table>
+              {usageTotalPages > 1 && (
+                <Inline align="center" style={{ justifyContent: 'center' }}>
+                  <Pagination totalPages={usageTotalPages} currentPage={usagePage} onChange={setUsagePage} />
+                </Inline>
+              )}
+              </Grid>
             )}
           </SectionBox>
 
-          <SectionBox title="Recent events (24h)">
+          <SectionBox title="Recent events">
             {data.recent.length === 0 ? (
               <Message state="neutral" noIcon>
                 No events to show yet.

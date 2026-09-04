@@ -7,6 +7,15 @@ export type Environment = 'dev' | 'local' | 'prod' | 'test'
 export const ENVIRONMENTS: Environment[] = ['dev', 'local', 'prod', 'test']
 export const DEFAULT_ENVIRONMENT: Environment = 'prod'
 
+export interface TimeRange {
+  minTimestamp: string
+  maxTimestamp: string
+}
+
+function rangeQuery(range: TimeRange): string {
+  return `minTimestamp=${encodeURIComponent(range.minTimestamp)}&maxTimestamp=${encodeURIComponent(range.maxTimestamp)}`
+}
+
 export interface RunStep {
   type: StepType
   label: string
@@ -83,18 +92,19 @@ async function fetchJson<T>(url: string): Promise<T> {
   return res.json()
 }
 
-export async function fetchDashboard(env: Environment): Promise<DashboardData> {
-  return fetchJson(`/api/dashboard?env=${env}`)
+export async function fetchDashboard(env: Environment, range: TimeRange): Promise<DashboardData> {
+  return fetchJson(`/api/dashboard?env=${env}&${rangeQuery(range)}`)
 }
 
 export async function fetchUsageRuns(
   entityType: string,
   entityId: string | null,
   env: Environment,
+  range: TimeRange,
 ): Promise<TicketRun[]> {
   const params = new URLSearchParams({ entityType, env })
   if (entityId) params.set('entityId', entityId)
-  const body = await fetchJson<{ runs: TicketRun[] }>(`/api/usage-runs?${params.toString()}`)
+  const body = await fetchJson<{ runs: TicketRun[] }>(`/api/usage-runs?${params.toString()}&${rangeQuery(range)}`)
   return body.runs
 }
 
@@ -107,9 +117,13 @@ export interface ErrorExample {
   ticketId: string | null
 }
 
-export async function fetchErrorExamples(kind: string, env: Environment): Promise<ErrorExample[]> {
+export async function fetchErrorExamples(
+  kind: string,
+  env: Environment,
+  range: TimeRange,
+): Promise<ErrorExample[]> {
   const body = await fetchJson<{ examples: ErrorExample[] }>(
-    `/api/errors/${encodeURIComponent(kind)}?env=${env}`,
+    `/api/errors/${encodeURIComponent(kind)}?env=${env}&${rangeQuery(range)}`,
   )
   return body.examples
 }
@@ -126,9 +140,10 @@ export async function fetchToolFailureExamples(
   tool: string,
   category: 'agent' | 'direct',
   env: Environment,
+  range: TimeRange,
 ): Promise<ToolFailureExample[]> {
   const body = await fetchJson<{ examples: ToolFailureExample[] }>(
-    `/api/tool-failures/${encodeURIComponent(tool)}?category=${category}&env=${env}`,
+    `/api/tool-failures/${encodeURIComponent(tool)}?category=${category}&env=${env}&${rangeQuery(range)}`,
   )
   return body.examples
 }
@@ -142,9 +157,10 @@ export interface SecurityJudgeExample {
 export async function fetchSecurityJudgeExamples(
   kind: string,
   env: Environment,
+  range: TimeRange,
 ): Promise<SecurityJudgeExample[]> {
   const body = await fetchJson<{ examples: SecurityJudgeExample[] }>(
-    `/api/security-judge/${encodeURIComponent(kind)}?env=${env}`,
+    `/api/security-judge/${encodeURIComponent(kind)}?env=${env}&${rangeQuery(range)}`,
   )
   return body.examples
 }
