@@ -1271,13 +1271,24 @@ function Dashboard() {
               </Table.Row>
             </Table.Header>
             <Table.Body>
-              {securityJudgeModal.items.map((s, i) => (
-                <Table.Row key={i}>
-                  <Table.Cell>{timeFormatter.format(new Date(s.time))}</Table.Cell>
-                  <Table.Cell>{s.ticketId ?? '—'}</Table.Cell>
-                  <Table.Cell style={{ wordBreak: 'break-word' }}>{s.detail}</Table.Cell>
-                </Table.Row>
-              ))}
+              {securityJudgeModal.items.map((s, i) => {
+                const link = entityLink('ticket', s.ticketId)
+                return (
+                  <Table.Row key={i}>
+                    <Table.Cell>{timeFormatter.format(new Date(s.time))}</Table.Cell>
+                    <Table.Cell>
+                      {link ? (
+                        <a href={link} target="_blank" rel="noreferrer">
+                          #{s.ticketId}
+                        </a>
+                      ) : (
+                        (s.ticketId ?? '—')
+                      )}
+                    </Table.Cell>
+                    <Table.Cell style={{ wordBreak: 'break-word' }}>{s.detail}</Table.Cell>
+                  </Table.Row>
+                )
+              })}
             </Table.Body>
           </Table>
         )}

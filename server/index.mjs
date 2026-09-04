@@ -154,20 +154,26 @@ async function fetchStepsByTrace(traceIds, insights) {
   return { stepsByTrace, exceptionTraces }
 }
 
-/** Looks up the model used in each trace, so a bare error/failure record (which usually doesn't
- * carry model info itself) can be attributed to the model that was active when it happened. */
-async function fetchModelByTrace(traceIds, insights) {
+/** Looks up the model and ticket active in each trace, so a bare error/failure record (which
+ * usually carries neither itself — the flat `ticket_id` attribute is unpopulated dead weight,
+ * always "-") can be attributed via its trace's invoke_agent span (model) and chat.request span
+ * (ticket, from context.entity_id when context.entity_type is "ticket"). */
+async function fetchTraceContext(traceIds, range) {
   const modelByTrace = new Map()
+  const ticketByTrace = new Map()
   const validIds = traceIds.filter((id) => TRACE_ID_RE.test(id))
-  if (validIds.length === 0) return modelByTrace
+  if (validIds.length === 0) return { modelByTrace, ticketByTrace }
   const result = await logfireQuery(
-    `SELECT trace_id, COALESCE(attributes->>'model_name', attributes->>'model') as model FROM records WHERE trace_id IN (${sqlList(validIds)}) AND COALESCE(attributes->>'model_name', attributes->>'model') IS NOT NULL ORDER BY start_timestamp`,
-    insights,
+    `SELECT trace_id, span_name, COALESCE(attributes->>'model_name', attributes->>'model') as model, attributes->'context'->>'entity_type' as entity_type, attributes->'context'->>'entity_id' as entity_id FROM records WHERE trace_id IN (${sqlList(validIds)}) AND (COALESCE(attributes->>'model_name', attributes->>'model') IS NOT NULL OR span_name = 'chat.request') ORDER BY start_timestamp`,
+    range,
   )
   for (const row of result.data) {
-    if (!modelByTrace.has(row.trace_id)) modelByTrace.set(row.trace_id, row.model)
+    if (row.model && !modelByTrace.has(row.trace_id)) modelByTrace.set(row.trace_id, row.model)
+    if (row.span_name === "chat.request" && row.entity_type === "ticket" && row.entity_id && !ticketByTrace.has(row.trace_id)) {
+      ticketByTrace.set(row.trace_id, row.entity_id)
+    }
   }
-  return modelByTrace
+  return { modelByTrace, ticketByTrace }
 }
 
 /** Groups ungrouped solution_agent_finished rows into one entry per ticket, newest run first. */
@@ -447,10 +453,10 @@ app.get("/api/errors/:kind", async (req, res) => {
     const kind = req.params.kind.replace(/'/g, "''")
     const range = resolveTimeRange(req)
     const result = await logfireQuery(
-      `SELECT trace_id, start_timestamp, service_name, message, exception_message, exception_type, attributes->>'ticket_id' as ticket_id FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) = '${kind}' ORDER BY start_timestamp DESC LIMIT 15`,
+      `SELECT trace_id, start_timestamp, service_name, message, exception_message, exception_type FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) = '${kind}' ORDER BY start_timestamp DESC LIMIT 15`,
       range,
     )
-    const modelByTrace = await fetchModelByTrace(
+    const { modelByTrace, ticketByTrace } = await fetchTraceContext(
       result.data.map((row) => row.trace_id),
       range,
     )
@@ -461,7 +467,7 @@ app.get("/api/errors/:kind", async (req, res) => {
         message: row.exception_message || row.message || "",
         exceptionType: row.exception_type ?? null,
         model: modelByTrace.get(row.trace_id) ?? null,
-        ticketId: row.ticket_id && row.ticket_id !== "-" ? row.ticket_id : null,
+        ticketId: ticketByTrace.get(row.trace_id) ?? null,
       })),
     })
   } catch (e) {
@@ -480,10 +486,10 @@ app.get("/api/tool-failures/:tool", async (req, res) => {
     const detailArgIndex = category === "direct" ? 2 : 1
     const range = resolveTimeRange(req)
     const result = await logfireQuery(
-      `SELECT trace_id, start_timestamp, attributes->>'logfire.msg_template' as template, attributes->'logfire.logging_args'->>${detailArgIndex} as detail, attributes->>'ticket_id' as ticket_id FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND attributes->>'logfire.msg_template' IN (${templateList}) AND attributes->'logfire.logging_args'->>${toolArgIndex} = '${tool}' ORDER BY start_timestamp DESC LIMIT 15`,
+      `SELECT trace_id, start_timestamp, attributes->>'logfire.msg_template' as template, attributes->'logfire.logging_args'->>${detailArgIndex} as detail FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND attributes->>'logfire.msg_template' IN (${templateList}) AND attributes->'logfire.logging_args'->>${toolArgIndex} = '${tool}' ORDER BY start_timestamp DESC LIMIT 15`,
       range,
     )
-    const modelByTrace = await fetchModelByTrace(
+    const { modelByTrace, ticketByTrace } = await fetchTraceContext(
       result.data.map((row) => row.trace_id),
       range,
     )
@@ -493,7 +499,7 @@ app.get("/api/tool-failures/:tool", async (req, res) => {
         kind: row.template?.includes("timed out") ? "timeout" : "exception",
         detail: row.template?.includes("timed out") ? `Timed out after ${row.detail}s` : row.detail ?? "",
         model: modelByTrace.get(row.trace_id) ?? null,
-        ticketId: row.ticket_id && row.ticket_id !== "-" ? row.ticket_id : null,
+        ticketId: ticketByTrace.get(row.trace_id) ?? null,
       })),
     })
   } catch (e) {
@@ -509,7 +515,11 @@ app.get("/api/security-judge/:kind", async (req, res) => {
     if (!spanName) return res.status(404).json({ error: "unknown kind" })
     const range = resolveTimeRange(req)
     const result = await logfireQuery(
-      `SELECT start_timestamp, attributes->>'ticket_id' as ticket_id, attributes->>'flagged_content' as flagged_content, attributes->'logfire.logging_args'->>0 as tool_name FROM records WHERE span_name = '${spanName.replace(/'/g, "''")}' AND deployment_environment = '${env}' ORDER BY start_timestamp DESC LIMIT 15`,
+      `SELECT trace_id, start_timestamp, attributes->>'flagged_content' as flagged_content, attributes->'logfire.logging_args'->>0 as tool_name FROM records WHERE span_name = '${spanName.replace(/'/g, "''")}' AND deployment_environment = '${env}' ORDER BY start_timestamp DESC LIMIT 15`,
+      range,
+    )
+    const { ticketByTrace } = await fetchTraceContext(
+      result.data.map((row) => row.trace_id),
       range,
     )
     res.json({
@@ -517,7 +527,7 @@ app.get("/api/security-judge/:kind", async (req, res) => {
         const content = row.flagged_content ?? (row.tool_name ? `Tool: ${row.tool_name}` : "")
         return {
           time: row.start_timestamp,
-          ticketId: row.ticket_id && row.ticket_id !== "-" ? row.ticket_id : null,
+          ticketId: ticketByTrace.get(row.trace_id) ?? null,
           detail: content.length > 300 ? `${content.slice(0, 300)}…` : content,
         }
       }),
