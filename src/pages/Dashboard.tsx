@@ -50,6 +50,7 @@ import {
   fetchErrorExamples,
   fetchSecurityJudgeExamples,
   fetchToolFailureExamples,
+  fetchUsageErrors,
   fetchUsageRuns,
   type DashboardData,
   type DashboardLevel,
@@ -62,6 +63,7 @@ import {
   type TimeRange,
   type TicketRun,
   type ToolFailureExample,
+  type UsageErrorExample,
 } from '../lib/dashboard'
 
 const OPS_MANAGER_BASE = 'https://internal-operations-staging.apps.aa.intility.com'
@@ -567,8 +569,10 @@ function Dashboard() {
   const [toolFailureModal, setToolFailureModal] = useState<AsyncModalState<ToolFailureExample> | null>(null)
   const [toolFailureCategory, setToolFailureCategory] = useState<'agent' | 'direct'>('agent')
   const [securityJudgeModal, setSecurityJudgeModal] = useState<AsyncModalState<SecurityJudgeExample> | null>(null)
+  const [usageErrorsModal, setUsageErrorsModal] = useState<AsyncModalState<UsageErrorExample> | null>(null)
   const [dayLogModal, setDayLogModal] = useState<AsyncModalState<DayLogEntry> | null>(null)
   const [usageFilter, setUsageFilter] = useState<string>('all')
+  const [usageErrorsOnly, setUsageErrorsOnly] = useState(false)
   const [usageSearch, setUsageSearch] = useState('')
   const [usagePage, setUsagePage] = useState(1)
   const [usageRunsByKey, setUsageRunsByKey] = useState<Record<string, UsageRunsState>>({})
@@ -602,6 +606,17 @@ function Dashboard() {
       fetchSecurityJudgeExamples(kind, environment, timeRange)
         .then((items) => setSecurityJudgeModal({ title: kind, items, loading: false, error: null }))
         .catch((e: Error) => setSecurityJudgeModal({ title: kind, items: null, loading: false, error: e.message }))
+    },
+    [environment, timeRange],
+  )
+
+  const openUsageErrorsModal = useCallback(
+    (entityType: string, entityId: string | null) => {
+      const title = entityId ? `#${entityId}` : entityType
+      setUsageErrorsModal({ title, items: null, loading: true, error: null })
+      fetchUsageErrors(entityType, entityId, environment, timeRange)
+        .then((items) => setUsageErrorsModal({ title, items, loading: false, error: null }))
+        .catch((e: Error) => setUsageErrorsModal({ title, items: null, loading: false, error: e.message }))
     },
     [environment, timeRange],
   )
@@ -671,9 +686,11 @@ function Dashboard() {
   const USAGE_PAGE_SIZE = 10
   const usageTypes = [...new Set((data?.usage ?? []).map((u) => u.entityType))]
   const usageSearchLower = usageSearch.trim().toLowerCase()
+  const usageWithErrors = (data?.usage ?? []).filter((u) => u.errorCount > 0).length
   const filteredUsage = (data?.usage ?? []).filter(
     (u) =>
       (usageFilter === 'all' || u.entityType === usageFilter) &&
+      (!usageErrorsOnly || u.errorCount > 0) &&
       (usageSearchLower === '' ||
         (u.entityId ?? '').toLowerCase().includes(usageSearchLower) ||
         (u.model ?? '').toLowerCase().includes(usageSearchLower)),
@@ -1004,6 +1021,16 @@ function Dashboard() {
                   </Button>
                 ))}
               </Button.Group>
+              <Button
+                variant={usageErrorsOnly ? 'filled' : 'basic'}
+                onClick={() => {
+                  setUsageErrorsOnly((v) => !v)
+                  setUsagePage(1)
+                }}
+              >
+                <Icon icon={faTriangleExclamation} marginRight />
+                Errors only ({usageWithErrors})
+              </Button>
               <Input
                 label="Search usage log"
                 hideLabel
@@ -1025,7 +1052,7 @@ function Dashboard() {
               </Message>
             ) : (
               <Grid gap={16}>
-                <Table key={`${usageFilter}-${usageSearchLower}-${usagePage}`}>
+                <Table key={`${usageFilter}-${usageErrorsOnly}-${usageSearchLower}-${usagePage}`}>
                 <Table.Header>
                   <Table.Row>
                     <Table.HeaderCell></Table.HeaderCell>
@@ -1038,7 +1065,7 @@ function Dashboard() {
                     <Table.HeaderCell>Solution triggers</Table.HeaderCell>
                     <Table.HeaderCell>Avg duration</Table.HeaderCell>
                     <Table.HeaderCell>Cost</Table.HeaderCell>
-                    <Table.HeaderCell>Outcome</Table.HeaderCell>
+                    <Table.HeaderCell>Errors</Table.HeaderCell>
                   </Table.Row>
                 </Table.Header>
                 <Table.Body>
@@ -1081,10 +1108,17 @@ function Dashboard() {
                           {row.costUsd != null ? preciseCostFormatter.format(row.costUsd) : '—'}
                         </Table.Cell>
                         <Table.Cell>
-                          {row.triggers === 0 ? (
-                            '—'
-                          ) : row.exceptions > 0 ? (
-                            <Badge state="alert">{row.exceptions} failed</Badge>
+                          {row.errorCount > 0 ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                openUsageErrorsModal(row.entityType, row.entityId)
+                              }}
+                              style={{ all: 'unset', cursor: 'pointer' }}
+                            >
+                              <Badge state="alert">{row.errorCount} failed</Badge>
+                            </button>
                           ) : (
                             <Badge state="neutral">OK</Badge>
                           )}
@@ -1289,6 +1323,45 @@ function Dashboard() {
                   </Table.Row>
                 )
               })}
+            </Table.Body>
+          </Table>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={usageErrorsModal != null}
+        onRequestClose={() => setUsageErrorsModal(null)}
+        header={usageErrorsModal ? `Errors · ${usageErrorsModal.title}` : undefined}
+        width={800}
+      >
+        {usageErrorsModal?.loading && (
+          <Inline align="center" gap={8}>
+            <Icon.Spinner size={20} />
+            <span>Loading examples …</span>
+          </Inline>
+        )}
+        {usageErrorsModal?.error && (
+          <Message state="alert" noIcon>
+            {usageErrorsModal.error}
+          </Message>
+        )}
+        {usageErrorsModal?.items && (
+          <Table>
+            <Table.Header>
+              <Table.Row>
+                <Table.HeaderCell>Time</Table.HeaderCell>
+                <Table.HeaderCell>Kind</Table.HeaderCell>
+                <Table.HeaderCell>Message</Table.HeaderCell>
+              </Table.Row>
+            </Table.Header>
+            <Table.Body>
+              {usageErrorsModal.items.map((e, i) => (
+                <Table.Row key={i}>
+                  <Table.Cell>{timeFormatter.format(new Date(e.time))}</Table.Cell>
+                  <Table.Cell>{e.kind}</Table.Cell>
+                  <Table.Cell style={{ wordBreak: 'break-word' }}>{e.message}</Table.Cell>
+                </Table.Row>
+              ))}
             </Table.Body>
           </Table>
         )}

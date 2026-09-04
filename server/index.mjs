@@ -209,6 +209,7 @@ app.get("/api/dashboard", async (req, res) => {
       toolFailuresResult,
       securityJudgeResult,
       usageResult,
+      usageErrorsResult,
       recentResult,
       toolsResult,
       modelsResult,
@@ -269,6 +270,14 @@ app.get("/api/dashboard", async (req, res) => {
             ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id' ORDER BY start_timestamp DESC) as rn
           FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
         ) WHERE rn = 1 ORDER BY last_seen DESC LIMIT 100`,
+        range,
+      ),
+      logfireQuery(
+        `SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, attributes->'context'->>'entity_id' as entity_id, count(distinct trace_id) as error_requests
+        FROM records
+        WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
+        AND trace_id IN (SELECT DISTINCT trace_id FROM records WHERE level >= 17 AND deployment_environment = '${env}')
+        GROUP BY 1, 2`,
         range,
       ),
       logfireQuery(
@@ -362,6 +371,12 @@ app.get("/api/dashboard", async (req, res) => {
         ? solutionDurations.reduce((sum, d) => sum + d, 0) / solutionDurations.length
         : 0
 
+    const errorCountByEntity = new Map()
+    for (const row of usageErrorsResult.data) {
+      const entityId = row.entity_id && row.entity_id !== "0" ? row.entity_id : null
+      errorCountByEntity.set(`${row.entity_type}-${entityId ?? "none"}`, Number(row.error_requests ?? 0))
+    }
+
     res.json({
       totals: {
         medianResponseTimeSec: Number(responseTimeRow.median_dur ?? 0),
@@ -423,6 +438,7 @@ app.get("/api/dashboard", async (req, res) => {
           avgDurationSec: solution?.avgDurationSec ?? 0,
           costUsd: solution?.costUsd ?? null,
           exceptions: solution?.exceptions ?? 0,
+          errorCount: errorCountByEntity.get(`${entityType}-${entityId ?? "none"}`) ?? 0,
           runs: solution?.runs ?? [],
         }
       }),
@@ -579,6 +595,42 @@ app.get("/api/usage-runs", async (req, res) => {
     res.json({ runs })
   } catch (e) {
     console.error("[logfire] usage runs query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/usage-errors", async (req, res) => {
+  try {
+    const env = resolveEnv(req)
+    const entityType = String(req.query.entityType ?? "none").replace(/'/g, "''")
+    const entityIdRaw = req.query.entityId
+    const entityId = entityIdRaw && entityIdRaw !== "null" ? String(entityIdRaw).replace(/'/g, "''") : null
+    const range = resolveTimeRange(req)
+
+    const entityIdFilter = entityId
+      ? `attributes->'context'->>'entity_id' = '${entityId}'`
+      : `attributes->'context'->>'entity_id' IS NULL`
+
+    const result = await logfireQuery(
+      `SELECT start_timestamp, message, exception_message, exception_type, span_name FROM records
+       WHERE level >= 17 AND deployment_environment = '${env}'
+       AND trace_id IN (
+         SELECT trace_id FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
+         AND COALESCE(attributes->'context'->>'entity_type', 'none') = '${entityType}' AND ${entityIdFilter}
+       )
+       ORDER BY start_timestamp DESC LIMIT 20`,
+      range,
+    )
+
+    res.json({
+      examples: result.data.map((row) => ({
+        time: row.start_timestamp,
+        kind: row.exception_type ?? row.span_name,
+        message: row.exception_message || row.message || "",
+      })),
+    })
+  } catch (e) {
+    console.error("[logfire] usage errors query failed:", e.message)
     res.status(e.status ?? 502).json({ error: e.message })
   }
 })

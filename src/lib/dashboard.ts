@@ -72,6 +72,7 @@ export interface DashboardData {
     avgDurationSec: number
     costUsd: number | null
     exceptions: number
+    errorCount: number
     runs: TicketRun[]
   }[]
   dailyCost: { day: string; cost: number; cumulativeCost: number }[]
@@ -106,6 +107,26 @@ export async function fetchUsageRuns(
   if (entityId) params.set('entityId', entityId)
   const body = await fetchJson<{ runs: TicketRun[] }>(`/api/usage-runs?${params.toString()}&${rangeQuery(range)}`)
   return body.runs
+}
+
+export interface UsageErrorExample {
+  time: string
+  kind: string
+  message: string
+}
+
+export async function fetchUsageErrors(
+  entityType: string,
+  entityId: string | null,
+  env: Environment,
+  range: TimeRange,
+): Promise<UsageErrorExample[]> {
+  const params = new URLSearchParams({ entityType, env })
+  if (entityId) params.set('entityId', entityId)
+  const body = await fetchJson<{ examples: UsageErrorExample[] }>(
+    `/api/usage-errors?${params.toString()}&${rangeQuery(range)}`,
+  )
+  return body.examples
 }
 
 export interface ErrorExample {
