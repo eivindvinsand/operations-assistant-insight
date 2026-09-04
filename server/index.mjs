@@ -43,8 +43,13 @@ function sqlList(values) {
 
 const SKIPPED_SPANS = new Set(["POST /api/v2/chat", "OPTIONS /api/v2/chat", "chat.request"])
 
-const TOOL_FAILURE_TEMPLATES = ["MCP tool %s raised exception: %s", "MCP tool %s timed out after %ds"]
-const TOOL_FAILURE_TEMPLATE_LIST = TOOL_FAILURE_TEMPLATES.map((t) => `'${t}'`).join(",")
+/** Tool call failures come in two shapes: normal agent-routed MCP calls, and "direct" calls that
+ * bypass the agent (used by retrieve_initial_data's background prefetches). Each shape uses a
+ * different logging_args layout, so they're queried and labeled separately. */
+const AGENT_TOOL_FAILURE_TEMPLATES = ["MCP tool %s raised exception: %s", "MCP tool %s timed out after %ds"]
+const AGENT_TOOL_FAILURE_TEMPLATE_LIST = AGENT_TOOL_FAILURE_TEMPLATES.map((t) => `'${t}'`).join(",")
+const DIRECT_TOOL_FAILURE_TEMPLATES = ["%s(%s) timed out after %ds", "%s(%s): MCP tool reported an error: %s"]
+const DIRECT_TOOL_FAILURE_TEMPLATE_LIST = DIRECT_TOOL_FAILURE_TEMPLATES.map((t) => `'${t}'`).join(",")
 
 /** Canonical LLM Judge block events, keyed by dashboard label. Each block is logged twice under
  * different span names within the same trace (a generic line plus a shorter duplicate) — only the
@@ -103,8 +108,8 @@ function classifyStep(row) {
   }
   return {
     type: "info",
-    label: spanName,
-    output: row.message && row.message !== spanName ? row.message : null,
+    label: row.message && row.message !== spanName ? row.message : spanName,
+    output: null,
   }
 }
 
@@ -129,9 +134,26 @@ async function fetchStepsByTrace(traceIds, insights) {
       ...classified,
       startedAt: row.start_timestamp,
       durationSec: row.duration ?? 0,
+      isError: row.level >= 17,
     })
   }
   return { stepsByTrace, exceptionTraces }
+}
+
+/** Looks up the model used in each trace, so a bare error/failure record (which usually doesn't
+ * carry model info itself) can be attributed to the model that was active when it happened. */
+async function fetchModelByTrace(traceIds, insights) {
+  const modelByTrace = new Map()
+  const validIds = traceIds.filter((id) => TRACE_ID_RE.test(id))
+  if (validIds.length === 0) return modelByTrace
+  const result = await logfireQuery(
+    `SELECT trace_id, COALESCE(attributes->>'model_name', attributes->>'model') as model FROM records WHERE trace_id IN (${sqlList(validIds)}) AND COALESCE(attributes->>'model_name', attributes->>'model') IS NOT NULL ORDER BY start_timestamp`,
+    insights,
+  )
+  for (const row of result.data) {
+    if (!modelByTrace.has(row.trace_id)) modelByTrace.set(row.trace_id, row.model)
+  }
+  return modelByTrace
 }
 
 /** Groups ungrouped solution_agent_finished rows into one entry per ticket, newest run first. */
@@ -203,7 +225,15 @@ app.get("/api/dashboard", async (req, res) => {
         insights,
       ),
       logfireQuery(
-        `SELECT attributes->'logfire.logging_args'->>0 as tool, count(*) as n FROM records WHERE level >= 17 AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC LIMIT 10`,
+        `SELECT category, tool, count(*) as n FROM (
+          SELECT 'agent' as category, attributes->'logfire.logging_args'->>0 as tool FROM records
+            WHERE level >= 17 AND deployment_environment = '${env}'
+            AND attributes->>'logfire.msg_template' IN (${AGENT_TOOL_FAILURE_TEMPLATE_LIST})
+          UNION ALL
+          SELECT 'direct' as category, attributes->'logfire.logging_args'->>1 as tool FROM records
+            WHERE level >= 17 AND deployment_environment = '${env}'
+            AND attributes->>'logfire.msg_template' IN (${DIRECT_TOOL_FAILURE_TEMPLATE_LIST})
+        ) GROUP BY 1, 2 ORDER BY n DESC LIMIT 30`,
         insights,
       ),
       logfireQuery(
@@ -272,11 +302,13 @@ app.get("/api/dashboard", async (req, res) => {
             steps: [],
             solution: null,
             costUsd: null,
+            failureReason: null,
           }
         }
         const agentSteps = steps.filter((s) => s.type === "agent" && s.output)
         const solution = agentSteps.length > 0 ? agentSteps[agentSteps.length - 1].output : null
         const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
+        const failedStep = steps.find((s) => s.isError)
         return {
           traceId: r.trace_id,
           timestamp: r.start_timestamp,
@@ -285,6 +317,7 @@ app.get("/api/dashboard", async (req, res) => {
           steps,
           solution,
           costUsd,
+          failureReason: failedStep?.label ?? null,
         }
       })
       const knownCosts = runs.filter((r) => r.costUsd != null)
@@ -339,7 +372,7 @@ app.get("/api/dashboard", async (req, res) => {
       },
       toolFailures: toolFailuresResult.data
         .filter((row) => row.tool)
-        .map((row) => ({ tool: row.tool, count: Number(row.n ?? 0) })),
+        .map((row) => ({ tool: row.tool, category: row.category, count: Number(row.n ?? 0) })),
       securityJudge: {
         total: securityJudgeResult.data.reduce((sum, row) => sum + Number(row.n ?? 0), 0),
         byKind: securityJudgeResult.data.map((row) => ({
@@ -404,7 +437,11 @@ app.get("/api/errors/:kind", async (req, res) => {
     const kind = req.params.kind.replace(/'/g, "''")
     const insights = { hoursBack: HOURS_BACK_INSIGHTS }
     const result = await logfireQuery(
-      `SELECT start_timestamp, service_name, message, exception_message FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) = '${kind}' ORDER BY start_timestamp DESC LIMIT 15`,
+      `SELECT trace_id, start_timestamp, service_name, message, exception_message, exception_type, attributes->>'ticket_id' as ticket_id FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) = '${kind}' ORDER BY start_timestamp DESC LIMIT 15`,
+      insights,
+    )
+    const modelByTrace = await fetchModelByTrace(
+      result.data.map((row) => row.trace_id),
       insights,
     )
     res.json({
@@ -412,6 +449,9 @@ app.get("/api/errors/:kind", async (req, res) => {
         time: row.start_timestamp,
         service: row.service_name ?? "unknown",
         message: row.exception_message || row.message || "",
+        exceptionType: row.exception_type ?? null,
+        model: modelByTrace.get(row.trace_id) ?? null,
+        ticketId: row.ticket_id && row.ticket_id !== "-" ? row.ticket_id : null,
       })),
     })
   } catch (e) {
@@ -424,9 +464,17 @@ app.get("/api/tool-failures/:tool", async (req, res) => {
   try {
     const env = resolveEnv(req)
     const tool = req.params.tool.replace(/'/g, "''")
+    const category = req.query.category === "direct" ? "direct" : "agent"
+    const templateList = category === "direct" ? DIRECT_TOOL_FAILURE_TEMPLATE_LIST : AGENT_TOOL_FAILURE_TEMPLATE_LIST
+    const toolArgIndex = category === "direct" ? 1 : 0
+    const detailArgIndex = category === "direct" ? 2 : 1
     const insights = { hoursBack: HOURS_BACK_INSIGHTS }
     const result = await logfireQuery(
-      `SELECT start_timestamp, attributes->>'logfire.msg_template' as template, attributes->'logfire.logging_args'->>1 as detail FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND attributes->>'logfire.msg_template' IN (${TOOL_FAILURE_TEMPLATE_LIST}) AND attributes->'logfire.logging_args'->>0 = '${tool}' ORDER BY start_timestamp DESC LIMIT 15`,
+      `SELECT trace_id, start_timestamp, attributes->>'logfire.msg_template' as template, attributes->'logfire.logging_args'->>${detailArgIndex} as detail, attributes->>'ticket_id' as ticket_id FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND attributes->>'logfire.msg_template' IN (${templateList}) AND attributes->'logfire.logging_args'->>${toolArgIndex} = '${tool}' ORDER BY start_timestamp DESC LIMIT 15`,
+      insights,
+    )
+    const modelByTrace = await fetchModelByTrace(
+      result.data.map((row) => row.trace_id),
       insights,
     )
     res.json({
@@ -434,6 +482,8 @@ app.get("/api/tool-failures/:tool", async (req, res) => {
         time: row.start_timestamp,
         kind: row.template?.includes("timed out") ? "timeout" : "exception",
         detail: row.template?.includes("timed out") ? `Timed out after ${row.detail}s` : row.detail ?? "",
+        model: modelByTrace.get(row.trace_id) ?? null,
+        ticketId: row.ticket_id && row.ticket_id !== "-" ? row.ticket_id : null,
       })),
     })
   } catch (e) {
@@ -493,6 +543,7 @@ app.get("/api/usage-runs", async (req, res) => {
       const outputSteps = steps.filter((s) => (s.type === "agent" || s.type === "chat") && s.output)
       const solution = outputSteps.length > 0 ? outputSteps[outputSteps.length - 1].output : null
       const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
+      const failedStep = steps.find((s) => s.isError)
       return {
         traceId: row.trace_id,
         timestamp: row.start_timestamp,
@@ -501,6 +552,7 @@ app.get("/api/usage-runs", async (req, res) => {
         steps,
         solution,
         costUsd: costUsd > 0 ? costUsd : null,
+        failureReason: failedStep?.label ?? null,
       }
     })
 

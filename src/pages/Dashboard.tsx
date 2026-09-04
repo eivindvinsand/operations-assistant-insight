@@ -313,8 +313,10 @@ function StepTitle({ index, step }: { index: number; step: RunStep }) {
   return (
     <Inline align="center" gap={8}>
       <small className="bfc-base-2">#{index + 1}</small>
-      <Icon icon={stepIcon[step.type]} className="bfc-base-2" />
-      <Inline.Stretch>{step.label}</Inline.Stretch>
+      <Icon icon={step.isError ? faTriangleExclamation : stepIcon[step.type]} className={step.isError ? 'bfc-alert' : 'bfc-base-2'} />
+      <Inline.Stretch>
+        <span className={step.isError ? 'bfc-alert' : undefined}>{step.label}</span>
+      </Inline.Stretch>
       <small className="bfc-base-2">{formatDuration(step.durationSec)}</small>
     </Inline>
   )
@@ -341,7 +343,7 @@ function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
     <Grid gap={16} style={{ padding: '4px 0 12px' }}>
       {runs.map((run) => (
         <Box key={run.traceId} padding radius border background="base">
-          <Inline align="center" gap={8} style={{ marginBottom: 12 }}>
+          <Inline align="center" gap={8} style={{ marginBottom: run.failureReason ? 4 : 12 }}>
             <strong>{timeFormatter.format(new Date(run.timestamp))}</strong>
             {run.outcome === 'exception' ? (
               <Badge state="alert">Failed</Badge>
@@ -353,6 +355,13 @@ function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
               <span className="bfc-base-2">{preciseCostFormatter.format(run.costUsd)}</span>
             )}
           </Inline>
+
+          {run.failureReason && (
+            <Inline align="center" gap={8} style={{ marginBottom: 12 }}>
+              <Icon icon={faTriangleExclamation} className="bfc-alert" />
+              <small className="bfc-alert">{run.failureReason}</small>
+            </Inline>
+          )}
 
           {run.solution && (
             <Box padding radius background="base-2" style={{ marginBottom: 12 }}>
@@ -441,6 +450,7 @@ function Dashboard() {
 
   const [errorModal, setErrorModal] = useState<AsyncModalState<ErrorExample> | null>(null)
   const [toolFailureModal, setToolFailureModal] = useState<AsyncModalState<ToolFailureExample> | null>(null)
+  const [toolFailureCategory, setToolFailureCategory] = useState<'agent' | 'direct'>('agent')
   const [securityJudgeModal, setSecurityJudgeModal] = useState<AsyncModalState<SecurityJudgeExample> | null>(null)
   const [dayLogModal, setDayLogModal] = useState<AsyncModalState<DayLogEntry> | null>(null)
   const [usageFilter, setUsageFilter] = useState<string>('all')
@@ -459,9 +469,9 @@ function Dashboard() {
   )
 
   const openToolFailureModal = useCallback(
-    (tool: string) => {
+    (tool: string, category: 'agent' | 'direct') => {
       setToolFailureModal({ title: tool, items: null, loading: true, error: null })
-      fetchToolFailureExamples(tool, environment)
+      fetchToolFailureExamples(tool, category, environment)
         .then((items) => setToolFailureModal({ title: tool, items, loading: false, error: null }))
         .catch((e: Error) => setToolFailureModal({ title: tool, items: null, loading: false, error: e.message }))
     },
@@ -525,6 +535,9 @@ function Dashboard() {
   }))
 
   const toolData = data?.tools ?? []
+  const agentToolFailures = (data?.toolFailures ?? []).filter((t) => t.category === 'agent')
+  const directToolFailures = (data?.toolFailures ?? []).filter((t) => t.category === 'direct')
+  const selectedToolFailures = toolFailureCategory === 'direct' ? directToolFailures : agentToolFailures
   const costData = (data?.models ?? [])
     .filter((m) => m.costUsd != null)
     .sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0))
@@ -794,14 +807,24 @@ function Dashboard() {
             </SectionBox>
 
             <SectionBox title="Tool call failures (7d)">
-              {data.toolFailures.length === 0 ? (
+              <Button.Group style={{ marginBottom: 16 }}>
+                <Button active={toolFailureCategory === 'agent'} onClick={() => setToolFailureCategory('agent')}>
+                  Agent tool calls ({agentToolFailures.length})
+                </Button>
+                <Button active={toolFailureCategory === 'direct'} onClick={() => setToolFailureCategory('direct')}>
+                  Direct tool calls ({directToolFailures.length})
+                </Button>
+              </Button.Group>
+              {selectedToolFailures.length === 0 ? (
                 <Message state="neutral" noIcon>
-                  No tool call failures recorded.
+                  {toolFailureCategory === 'direct'
+                    ? 'No direct tool call failures recorded. These happen during initial data retrieval, bypassing the agent.'
+                    : 'No agent tool call failures recorded.'}
                 </Message>
               ) : (
                 <BreakdownBars
-                  items={data.toolFailures.map((t) => ({ label: t.tool, count: t.count }))}
-                  onSelect={openToolFailureModal}
+                  items={selectedToolFailures.map((t) => ({ label: t.tool, count: t.count }))}
+                  onSelect={(tool) => openToolFailureModal(tool, toolFailureCategory)}
                 />
               )}
             </SectionBox>
@@ -956,7 +979,7 @@ function Dashboard() {
         isOpen={errorModal != null}
         onRequestClose={() => setErrorModal(null)}
         header={errorModal?.title}
-        width={700}
+        width={800}
       >
         {errorModal?.loading && (
           <Inline align="center" gap={8}>
@@ -974,18 +997,31 @@ function Dashboard() {
             <Table.Header>
               <Table.Row>
                 <Table.HeaderCell>Time</Table.HeaderCell>
-                <Table.HeaderCell>Service</Table.HeaderCell>
+                <Table.HeaderCell>Model</Table.HeaderCell>
+                <Table.HeaderCell>Ticket</Table.HeaderCell>
                 <Table.HeaderCell>Message</Table.HeaderCell>
               </Table.Row>
             </Table.Header>
             <Table.Body>
-              {errorModal.items.map((e, i) => (
-                <Table.Row key={i}>
-                  <Table.Cell>{timeFormatter.format(new Date(e.time))}</Table.Cell>
-                  <Table.Cell>{e.service}</Table.Cell>
-                  <Table.Cell style={{ wordBreak: 'break-word' }}>{e.message}</Table.Cell>
-                </Table.Row>
-              ))}
+              {errorModal.items.map((e, i) => {
+                const link = entityLink('ticket', e.ticketId)
+                return (
+                  <Table.Row key={i}>
+                    <Table.Cell>{timeFormatter.format(new Date(e.time))}</Table.Cell>
+                    <Table.Cell>{e.model ?? '—'}</Table.Cell>
+                    <Table.Cell>
+                      {link ? (
+                        <a href={link} target="_blank" rel="noreferrer">
+                          #{e.ticketId}
+                        </a>
+                      ) : (
+                        (e.ticketId ?? '—')
+                      )}
+                    </Table.Cell>
+                    <Table.Cell style={{ wordBreak: 'break-word' }}>{e.message}</Table.Cell>
+                  </Table.Row>
+                )
+              })}
             </Table.Body>
           </Table>
         )}
@@ -995,7 +1031,7 @@ function Dashboard() {
         isOpen={toolFailureModal != null}
         onRequestClose={() => setToolFailureModal(null)}
         header={toolFailureModal?.title}
-        width={700}
+        width={800}
       >
         {toolFailureModal?.loading && (
           <Inline align="center" gap={8}>
@@ -1014,19 +1050,34 @@ function Dashboard() {
               <Table.Row>
                 <Table.HeaderCell>Time</Table.HeaderCell>
                 <Table.HeaderCell>Kind</Table.HeaderCell>
+                <Table.HeaderCell>Model</Table.HeaderCell>
+                <Table.HeaderCell>Ticket</Table.HeaderCell>
                 <Table.HeaderCell>Detail</Table.HeaderCell>
               </Table.Row>
             </Table.Header>
             <Table.Body>
-              {toolFailureModal.items.map((t, i) => (
-                <Table.Row key={i}>
-                  <Table.Cell>{timeFormatter.format(new Date(t.time))}</Table.Cell>
-                  <Table.Cell>
-                    <Badge state={t.kind === 'timeout' ? 'warning' : 'alert'}>{t.kind}</Badge>
-                  </Table.Cell>
-                  <Table.Cell style={{ wordBreak: 'break-word' }}>{t.detail}</Table.Cell>
-                </Table.Row>
-              ))}
+              {toolFailureModal.items.map((t, i) => {
+                const link = entityLink('ticket', t.ticketId)
+                return (
+                  <Table.Row key={i}>
+                    <Table.Cell>{timeFormatter.format(new Date(t.time))}</Table.Cell>
+                    <Table.Cell>
+                      <Badge state={t.kind === 'timeout' ? 'warning' : 'alert'}>{t.kind}</Badge>
+                    </Table.Cell>
+                    <Table.Cell>{t.model ?? '—'}</Table.Cell>
+                    <Table.Cell>
+                      {link ? (
+                        <a href={link} target="_blank" rel="noreferrer">
+                          #{t.ticketId}
+                        </a>
+                      ) : (
+                        (t.ticketId ?? '—')
+                      )}
+                    </Table.Cell>
+                    <Table.Cell style={{ wordBreak: 'break-word' }}>{t.detail}</Table.Cell>
+                  </Table.Row>
+                )
+              })}
             </Table.Body>
           </Table>
         )}

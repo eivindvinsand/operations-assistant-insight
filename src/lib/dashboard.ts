@@ -13,6 +13,7 @@ export interface RunStep {
   output: string | null
   startedAt: string
   durationSec: number
+  isError: boolean
 }
 
 export interface TicketRun {
@@ -23,6 +24,7 @@ export interface TicketRun {
   steps: RunStep[]
   solution: string | null
   costUsd: number
+  failureReason: string | null
 }
 
 export interface DashboardData {
@@ -40,7 +42,7 @@ export interface DashboardData {
   context: { type: string; count: number }[]
   dailyUsers: { day: string; users: number; messages: number }[]
   errors: { total: number; byKind: { kind: string; count: number }[] }
-  toolFailures: { tool: string; count: number }[]
+  toolFailures: { tool: string; category: 'agent' | 'direct'; count: number }[]
   securityJudge: { total: number; byKind: { kind: string; count: number }[] }
   tools: { tool: string; count: number }[]
   models: {
@@ -100,6 +102,9 @@ export interface ErrorExample {
   time: string
   service: string
   message: string
+  exceptionType: string | null
+  model: string | null
+  ticketId: string | null
 }
 
 export async function fetchErrorExamples(kind: string, env: Environment): Promise<ErrorExample[]> {
@@ -113,11 +118,17 @@ export interface ToolFailureExample {
   time: string
   kind: 'exception' | 'timeout'
   detail: string
+  model: string | null
+  ticketId: string | null
 }
 
-export async function fetchToolFailureExamples(tool: string, env: Environment): Promise<ToolFailureExample[]> {
+export async function fetchToolFailureExamples(
+  tool: string,
+  category: 'agent' | 'direct',
+  env: Environment,
+): Promise<ToolFailureExample[]> {
   const body = await fetchJson<{ examples: ToolFailureExample[] }>(
-    `/api/tool-failures/${encodeURIComponent(tool)}?env=${env}`,
+    `/api/tool-failures/${encodeURIComponent(tool)}?category=${category}&env=${env}`,
   )
   return body.examples
 }
