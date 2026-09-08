@@ -805,11 +805,17 @@ app.get("/api/day-log", async (req, res) => {
 
 app.get("/api/ticket-info", async (req, res) => {
   try {
-    const ticketId = parseInt(String(req.query.ticketId ?? ""), 10)
-    if (!Number.isFinite(ticketId)) return res.status(400).json({ error: "ticketId must be numeric" })
+    const ticketIdText = String(req.query.ticketId ?? "")
+    const ticketIdNum = parseInt(ticketIdText, 10)
+    if (!ticketIdText) return res.status(400).json({ error: "ticketId is required" })
+    // Unclear which column the entity ID from Logfire actually lines up with here, so match
+    // either: ticket_id (numeric, when parseable) or reference_number (whatever shape it is).
     const rows = await dwhQuery(
-      `SELECT ticket_id, reference_number, ticket_title, category_name, category_fullname, implementation_name, company_name, intility_worker_fullname AS owner, ticket_status, ticket_priority FROM customer_inquiries.tickets_last_five_years WHERE ticket_id = @ticketId`,
-      [{ name: "ticketId", type: sqlTypes.Int, value: ticketId }],
+      `SELECT ticket_id, reference_number, ticket_title, category_name, category_fullname, implementation_name, company_name, intility_worker_fullname AS owner, ticket_status, ticket_priority FROM customer_inquiries.tickets_last_five_years WHERE ticket_id = @ticketIdNum OR reference_number = @ticketIdText`,
+      [
+        { name: "ticketIdNum", type: sqlTypes.Int, value: Number.isFinite(ticketIdNum) ? ticketIdNum : null },
+        { name: "ticketIdText", type: sqlTypes.NVarChar, value: ticketIdText },
+      ],
     )
     const row = rows[0]
     res.json({
