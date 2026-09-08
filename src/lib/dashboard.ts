@@ -204,6 +204,26 @@ export async function fetchDayLog(date: string, env: Environment): Promise<DayLo
   return body.entries
 }
 
+export interface TicketInfo {
+  ticketId: string
+  referenceNumber: string
+  title: string
+  categoryName: string | null
+  categoryFullName: string | null
+  implementationName: string | null
+  companyName: string | null
+  owner: string | null
+  status: string | null
+  priority: string | null
+}
+
+export async function fetchTicketInfo(ticketId: string): Promise<TicketInfo | null> {
+  const body = await fetchJson<{ ticket: TicketInfo | null }>(
+    `/api/ticket-info?ticketId=${encodeURIComponent(ticketId)}`,
+  )
+  return body.ticket
+}
+
 export interface NoAnswerExample {
   time: string
   traceId: string

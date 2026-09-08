@@ -803,6 +803,37 @@ app.get("/api/day-log", async (req, res) => {
   }
 })
 
+app.get("/api/ticket-info", async (req, res) => {
+  try {
+    const referenceNumber = String(req.query.ticketId ?? "")
+    if (!referenceNumber) return res.status(400).json({ error: "ticketId is required" })
+    const rows = await dwhQuery(
+      `SELECT ticket_id, reference_number, ticket_title, category_name, category_fullname, implementation_name, company_name, intility_worker_fullname AS owner, ticket_status, ticket_priority FROM support.tickets WHERE reference_number = @ticketId`,
+      [{ name: "ticketId", type: sqlTypes.NVarChar, value: referenceNumber }],
+    )
+    const row = rows[0]
+    res.json({
+      ticket: row
+        ? {
+            ticketId: String(row.ticket_id),
+            referenceNumber: row.reference_number,
+            title: row.ticket_title,
+            categoryName: row.category_name ?? null,
+            categoryFullName: row.category_fullname ?? null,
+            implementationName: row.implementation_name ?? null,
+            companyName: row.company_name ?? null,
+            owner: row.owner ?? null,
+            status: row.ticket_status ?? null,
+            priority: row.ticket_priority ?? null,
+          }
+        : null,
+    })
+  } catch (e) {
+    console.error("[dwh] ticket info fetch failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
 app.get("/api/dwh-test", (_req, res) => {
   const addr = process.env.MINATO_LINK_DWH_ADDR
   if (!addr) {

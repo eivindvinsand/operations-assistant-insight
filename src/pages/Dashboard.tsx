@@ -52,6 +52,7 @@ import {
   fetchNoAnswerExamples,
   fetchSecurityJudgeExamples,
   fetchToolFailureExamples,
+  fetchTicketInfo,
   fetchUsageErrors,
   fetchUsageRuns,
   type DashboardData,
@@ -62,6 +63,7 @@ import {
   type RunStep,
   type SecurityJudgeExample,
   type StepType,
+  type TicketInfo,
   type TimeRange,
   type TicketRun,
   type ToolFailureExample,
@@ -687,6 +689,56 @@ interface UsageRunsState {
   error: string | null
 }
 
+interface TicketInfoState {
+  item: TicketInfo | null
+  loading: boolean
+  error: string | null
+}
+
+function TicketInfoPanel({ ticketInfo }: { ticketInfo: TicketInfoState | undefined }) {
+  if (!ticketInfo || ticketInfo.loading) {
+    return (
+      <Inline align="center" gap={8}>
+        <Icon.Spinner size={16} />
+        <span className="bfc-base-2">Loading ticket info …</span>
+      </Inline>
+    )
+  }
+  if (ticketInfo.error) {
+    return (
+      <Message state="alert" noIcon>
+        {ticketInfo.error}
+      </Message>
+    )
+  }
+  if (!ticketInfo.item) {
+    return <small className="bfc-base-2">No ticket info found in DWH.</small>
+  }
+  const t = ticketInfo.item
+  const fields: [string, string | null][] = [
+    ['Category', t.categoryFullName ?? t.categoryName],
+    ['Implementation', t.implementationName],
+    ['Company', t.companyName],
+    ['Owner', t.owner],
+    ['Status', t.status],
+    ['Priority', t.priority],
+  ]
+  return (
+    <Grid gap={4}>
+      <strong>{t.title}</strong>
+      <Inline gap={16} style={{ flexWrap: 'wrap' }}>
+        {fields
+          .filter(([, value]) => value)
+          .map(([label, value]) => (
+            <span key={label}>
+              <span className="bfc-base-2">{label}:</span> {value}
+            </span>
+          ))}
+      </Inline>
+    </Grid>
+  )
+}
+
 /** Catches a render-time crash in `children` and shows the error instead of
  * unmounting the whole page (React has no default recovery from a thrown
  * render). Scope it around any subtree fed by data we don't fully control —
@@ -717,12 +769,20 @@ class ErrorBoundary extends Component<{ children: ReactNode; label: string }, { 
 function UsageRowDetails({
   solutionRuns,
   chatRuns,
+  ticketInfo,
 }: {
   solutionRuns: TicketRun[]
   chatRuns: UsageRunsState | undefined
+  ticketInfo: TicketInfoState | undefined
 }) {
   return (
     <Grid gap={16} style={{ padding: '4px 0 12px' }}>
+      {ticketInfo && (
+        <Box padding radius background="base-2">
+          <TicketInfoPanel ticketInfo={ticketInfo} />
+        </Box>
+      )}
+
       {solutionRuns.length > 0 && (
         <Box>
           <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
@@ -1033,6 +1093,8 @@ function Dashboard() {
   const [usagePage, setUsagePage] = useState(1)
   const [usageRunsByKey, setUsageRunsByKey] = useState<Record<string, UsageRunsState>>({})
   const loadedUsageKeys = useRef(new Set<string>())
+  const [ticketInfoByKey, setTicketInfoByKey] = useState<Record<string, TicketInfoState>>({})
+  const loadedTicketInfoKeys = useRef(new Set<string>())
   const [environment, setEnvironment] = useState<Environment>(DEFAULT_ENVIRONMENT)
   const [timeRange, setTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE)
 
@@ -1092,6 +1154,18 @@ function Dashboard() {
     [environment, timeRange],
   )
 
+  const loadTicketInfo = useCallback((entityType: string, entityId: string | null) => {
+    if (entityType !== 'ticket' || !entityId) return
+    if (loadedTicketInfoKeys.current.has(entityId)) return
+    loadedTicketInfoKeys.current.add(entityId)
+    setTicketInfoByKey((prev) => ({ ...prev, [entityId]: { item: null, loading: true, error: null } }))
+    fetchTicketInfo(entityId)
+      .then((item) => setTicketInfoByKey((prev) => ({ ...prev, [entityId]: { item, loading: false, error: null } })))
+      .catch((e: Error) =>
+        setTicketInfoByKey((prev) => ({ ...prev, [entityId]: { item: null, loading: false, error: e.message } })),
+      )
+  }, [])
+
   const openDayLogModal = useCallback(
     (dayIso: string) => {
       const date = dayIso.slice(0, 10)
@@ -1115,6 +1189,8 @@ function Dashboard() {
     setError(null)
     loadedUsageKeys.current.clear()
     setUsageRunsByKey({})
+    loadedTicketInfoKeys.current.clear()
+    setTicketInfoByKey({})
     fetchDashboard(environment, timeRange)
       .then(setData)
       .catch((e: Error) => setError(e.message))
@@ -1362,10 +1438,17 @@ function Dashboard() {
                         key={usageKey}
                         content={
                           <ErrorBoundary label="this row's details">
-                            <UsageRowDetails solutionRuns={row.runs} chatRuns={usageRunsByKey[usageKey]} />
+                            <UsageRowDetails
+                              solutionRuns={row.runs}
+                              chatRuns={usageRunsByKey[usageKey]}
+                              ticketInfo={row.entityType === 'ticket' && row.entityId ? ticketInfoByKey[row.entityId] : undefined}
+                            />
                           </ErrorBoundary>
                         }
-                        onOpenChange={() => loadUsageRuns(row.entityType, row.entityId)}
+                        onOpenChange={() => {
+                          loadUsageRuns(row.entityType, row.entityId)
+                          loadTicketInfo(row.entityType, row.entityId)
+                        }}
                       >
                         <Table.Cell>{formatUsageTimestamp(row.lastSeen)}</Table.Cell>
                         <Table.Cell>
