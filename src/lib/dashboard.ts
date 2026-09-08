@@ -23,6 +23,8 @@ export interface RunStep {
   startedAt: string
   durationSec: number
   isError: boolean
+  exceptionMessage: string | null
+  exceptionType: string | null
 }
 
 export interface TicketRun {
@@ -34,6 +36,7 @@ export interface TicketRun {
   solution: string | null
   costUsd: number
   failureReason: string | null
+  hasNoAnswer: boolean
 }
 
 export interface DashboardData {
@@ -41,19 +44,22 @@ export interface DashboardData {
     medianResponseTimeSec: number
     avgResponseTimeSec: number
     solutionMedianResponseTimeSec: number
-    solutionAvgResponseTimeSec: number
     tokensUsed: number
     cachedTokens: number
     costUsd: number
     uniqueUsers: number
     uses: number
+    noAnswerCount: number
+    noAnswerPercent: number
+    totalEntities: number
   }
   context: { type: string; count: number }[]
-  dailyUsers: { day: string; users: number; messages: number }[]
+  dailyUsers: { day: string; users: number; messages: number; cumulativeUsers: number }[]
   errors: { total: number; byKind: { kind: string; count: number }[] }
   toolFailures: { tool: string; category: 'agent' | 'direct'; count: number }[]
   securityJudge: { total: number; byKind: { kind: string; count: number }[] }
-  tools: { tool: string; count: number }[]
+  tools: { tool: string; calls: number; totalDurationSec: number; avgDurationSec: number; errors: number }[]
+  llmCalls: { model: string; calls: number; inputTokens: number; outputTokens: number; totalDurationSec: number }[]
   models: {
     model: string
     inputTokens: number
@@ -73,15 +79,11 @@ export interface DashboardData {
     costUsd: number | null
     exceptions: number
     errorCount: number
+    noAnswerCount: number
     runs: TicketRun[]
   }[]
   dailyCost: { day: string; cost: number; cumulativeCost: number }[]
-  recent: {
-    time: string
-    service: string
-    level: DashboardLevel
-    message: string
-  }[]
+  dailyUsageByContext: { day: string; type: string; count: number }[]
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -199,4 +201,20 @@ export async function fetchDayLog(date: string, env: Environment): Promise<DayLo
     `/api/day-log?date=${encodeURIComponent(date)}&env=${env}`,
   )
   return body.entries
+}
+
+export interface NoAnswerExample {
+  time: string
+  traceId: string
+  durationSec: number
+  reason: string
+  model: string | null
+  ticketId: string | null
+}
+
+export async function fetchNoAnswerExamples(env: Environment, range: TimeRange): Promise<NoAnswerExample[]> {
+  const body = await fetchJson<{ examples: NoAnswerExample[] }>(
+    `/api/no-answer?env=${env}&${rangeQuery(range)}`,
+  )
+  return body.examples
 }
