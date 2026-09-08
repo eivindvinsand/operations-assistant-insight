@@ -19,6 +19,7 @@
     "@intility/bifrost-react": "^6.20.0",
     "express": "^5.2.1",
     "marked": "^18.0.11",
+    "mssql": "^12.7.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "^8.3.1",

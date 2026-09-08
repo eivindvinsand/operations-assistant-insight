@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url"
 import { connect } from "node:net"
 import express from "express"
 import { logfireQuery } from "./logfire.mjs"
+import { dwhQuery, sqlTypes } from "./dwh.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.join(__dirname, "..", "dist")
@@ -41,14 +42,6 @@ function resolveTimeRange(req) {
     minTimestamp: new Date(now.getTime() - DEFAULT_RANGE_HOURS * 60 * 60 * 1000).toISOString(),
     maxTimestamp: now.toISOString(),
   }
-}
-
-function levelLabel(level) {
-  if (level == null) return "info"
-  if (level >= 17) return "error"
-  if (level >= 13) return "warning"
-  if (level >= 9) return "info"
-  return "debug"
 }
 
 function sqlList(values) {
@@ -135,7 +128,7 @@ async function fetchStepsByTrace(traceIds, insights) {
   if (traceIds.length === 0) return { stepsByTrace, exceptionTraces }
   const traceList = sqlList(traceIds)
   const result = await logfireQuery(
-    `SELECT trace_id, start_timestamp, duration, span_name, message, level, attributes FROM records WHERE trace_id IN (${traceList}) ORDER BY start_timestamp`,
+    `SELECT trace_id, start_timestamp, duration, span_name, message, level, attributes, exception_message, exception_type FROM records WHERE trace_id IN (${traceList}) ORDER BY start_timestamp`,
     insights,
   )
   for (const row of result.data) {
@@ -146,6 +139,8 @@ async function fetchStepsByTrace(traceIds, insights) {
     stepsByTrace.get(row.trace_id).push({
       costUsd: null,
       ...classified,
+      exceptionMessage: row.exception_message ?? null,
+      exceptionType: row.exception_type ?? null,
       startedAt: row.start_timestamp,
       durationSec: row.duration ?? 0,
       isError: row.level >= 17,
@@ -210,14 +205,16 @@ app.get("/api/dashboard", async (req, res) => {
       securityJudgeResult,
       usageResult,
       usageErrorsResult,
-      recentResult,
       toolsResult,
+      llmCallsResult,
       modelsResult,
       solutionRunsResult,
       dailyCostResult,
+      dailyUsageByContextResult,
+      dailyUserIdsResult,
     ] = await Promise.all([
       logfireQuery(
-        `SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}'`,
+        `SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}' AND trace_id NOT IN (SELECT DISTINCT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}')`,
         range,
       ),
       logfireQuery(
@@ -258,10 +255,11 @@ app.get("/api/dashboard", async (req, res) => {
         range,
       ),
       logfireQuery(
-        `SELECT entity_type, entity_id, n, last_seen, model, reasoning_effort FROM (
+        `SELECT entity_type, entity_id, trace_id, n, last_seen, model, reasoning_effort FROM (
           SELECT
             COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
             attributes->'context'->>'entity_id' as entity_id,
+            trace_id,
             attributes->>'model' as model,
             attributes->>'reasoning_effort' as reasoning_effort,
             start_timestamp,
@@ -281,15 +279,15 @@ app.get("/api/dashboard", async (req, res) => {
         range,
       ),
       logfireQuery(
-        `SELECT start_timestamp, service_name, level, message FROM records WHERE deployment_environment = '${env}' ORDER BY start_timestamp DESC LIMIT 15`,
-        range,
-      ),
-      logfireQuery(
-        `SELECT substring(span_name, 12) as tool, count(*) as n FROM records WHERE span_name LIKE 'tools/call %' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY n DESC LIMIT 10`,
+        `SELECT substring(span_name, 12) as tool, count(*) as calls, sum(duration) as total_duration, avg(duration) as avg_duration, sum(CASE WHEN level >= 17 THEN 1 ELSE 0 END) as errors FROM records WHERE span_name LIKE 'tools/call %' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY total_duration DESC`,
         range,
       ),
       logfireQuery(
         `SELECT attributes->>'model_name' as model, sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT))) as input_tokens, sum(COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT))) as output_tokens, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost_usd, count(*) as calls FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY calls DESC LIMIT 8`,
+        range,
+      ),
+      logfireQuery(
+        `SELECT substring(span_name, 6) as model, count(*) as calls, sum(COALESCE(CAST(attributes->>'gen_ai.usage.input_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.input_tokens' AS BIGINT), 0)) as input_tokens, sum(COALESCE(CAST(attributes->>'gen_ai.usage.output_tokens' AS BIGINT), CAST(attributes->>'gen_ai.aggregated_usage.output_tokens' AS BIGINT), 0)) as output_tokens, sum(duration) as total_duration FROM records WHERE span_name LIKE 'chat %' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY (input_tokens + output_tokens) DESC`,
         range,
       ),
       logfireQuery(
@@ -300,7 +298,31 @@ app.get("/api/dashboard", async (req, res) => {
         `SELECT date_trunc('day', start_timestamp) as day, sum(CAST(attributes->'logfire.metrics'->'operation.cost'->>'total' AS DOUBLE)) as cost FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY 1`,
         range,
       ),
+      logfireQuery(
+        `SELECT date_trunc('day', start_timestamp) as day, COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, count(*) as n FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' GROUP BY 1, 2 ORDER BY 1`,
+        range,
+      ),
+      logfireQuery(
+        `SELECT date_trunc('day', start_timestamp) as day, attributes->>'anon_user_id' as user_id FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' AND attributes->>'anon_user_id' IS NOT NULL GROUP BY 1, 2 ORDER BY 1`,
+        range,
+      ),
     ])
+
+    const lastTraceIds = usageResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
+    const answeredTracesResult = await logfireQuery(
+      `SELECT DISTINCT trace_id FROM records WHERE trace_id IN (${sqlList(lastTraceIds)}) AND deployment_environment = '${env}' AND ((span_name LIKE 'chat %' AND attributes->'gen_ai.output.messages' IS NOT NULL AND attributes->'gen_ai.output.messages' != '[]') OR (attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' IS NOT NULL AND attributes->>'final_result' != ''))`,
+      range,
+    )
+    const answeredTraces = new Set(answeredTracesResult.data.map((r) => r.trace_id))
+    const noAnswerByEntity = new Map()
+    for (const row of usageResult.data) {
+      const entityId = row.entity_id && row.entity_id !== "0" ? row.entity_id : null
+      const key = `${row.entity_type}-${entityId ?? "none"}`
+      noAnswerByEntity.set(key, answeredTraces.has(row.trace_id) ? 0 : 1)
+    }
+    const noAnswerCount = [...noAnswerByEntity.values()].filter((v) => v === 1).length
+    const totalEntities = usageResult.data.length
+    const noAnswerPercent = totalEntities > 0 ? (noAnswerCount / totalEntities) * 100 : 0
 
     const allTickets = groupRunsByTicket(solutionRunsResult.data)
     const detailedTickets = allTickets.slice(0, 15)
@@ -366,10 +388,6 @@ app.get("/api/dashboard", async (req, res) => {
       .sort((a, b) => a - b)
     const solutionMedianResponseTimeSec =
       solutionDurations.length > 0 ? solutionDurations[Math.floor(solutionDurations.length / 2)] : 0
-    const solutionAvgResponseTimeSec =
-      solutionDurations.length > 0
-        ? solutionDurations.reduce((sum, d) => sum + d, 0) / solutionDurations.length
-        : 0
 
     const errorCountByEntity = new Map()
     for (const row of usageErrorsResult.data) {
@@ -382,19 +400,34 @@ app.get("/api/dashboard", async (req, res) => {
         medianResponseTimeSec: Number(responseTimeRow.median_dur ?? 0),
         avgResponseTimeSec: Number(responseTimeRow.avg_dur ?? 0),
         solutionMedianResponseTimeSec: Number(solutionMedianResponseTimeSec ?? 0),
-        solutionAvgResponseTimeSec: Number(solutionAvgResponseTimeSec ?? 0),
         tokensUsed: Number(tokensCostRow.total_tokens ?? 0),
         cachedTokens: Number(tokensCostRow.cached_tokens ?? 0),
         costUsd: Number(tokensCostRow.cost_usd ?? 0),
         uniqueUsers: Number(usageTodayRow.users ?? 0),
         uses: Number(usageTodayRow.uses ?? 0),
+        noAnswerCount,
+        noAnswerPercent,
+        totalEntities,
       },
       context: contextResult.data.map((row) => ({ type: row.entity_type, count: Number(row.n ?? 0) })),
-      dailyUsers: dailyUsersResult.data.map((row) => ({
-        day: row.day,
-        users: Number(row.users ?? 0),
-        messages: Number(row.messages ?? 0),
-      })),
+      dailyUsers: (() => {
+        const userIdsByDay = new Map()
+        for (const row of dailyUserIdsResult.data) {
+          if (!userIdsByDay.has(row.day)) userIdsByDay.set(row.day, new Set())
+          userIdsByDay.get(row.day).add(row.user_id)
+        }
+        const seenUsers = new Set()
+        return dailyUsersResult.data.map((row) => {
+          const dayUsers = userIdsByDay.get(row.day) ?? new Set()
+          for (const u of dayUsers) seenUsers.add(u)
+          return {
+            day: row.day,
+            users: Number(row.users ?? 0),
+            messages: Number(row.messages ?? 0),
+            cumulativeUsers: seenUsers.size,
+          }
+        })
+      })(),
       errors: {
         total: Number(errorsTotalResult.data[0]?.n ?? 0),
         byKind: errorKindsResult.data
@@ -413,7 +446,22 @@ app.get("/api/dashboard", async (req, res) => {
       },
       tools: toolsResult.data
         .filter((row) => row.tool)
-        .map((row) => ({ tool: row.tool, count: Number(row.n ?? 0) })),
+        .map((row) => ({
+          tool: row.tool,
+          calls: Number(row.calls ?? 0),
+          totalDurationSec: Number(row.total_duration ?? 0),
+          avgDurationSec: Number(row.avg_duration ?? 0),
+          errors: Number(row.errors ?? 0),
+        })),
+      llmCalls: llmCallsResult.data
+        .filter((row) => row.model)
+        .map((row) => ({
+          model: row.model,
+          calls: Number(row.calls ?? 0),
+          inputTokens: Number(row.input_tokens ?? 0),
+          outputTokens: Number(row.output_tokens ?? 0),
+          totalDurationSec: Number(row.total_duration ?? 0),
+        })),
       models: modelsResult.data
         .filter((row) => row.model)
         .map((row) => ({
@@ -439,6 +487,7 @@ app.get("/api/dashboard", async (req, res) => {
           costUsd: solution?.costUsd ?? null,
           exceptions: solution?.exceptions ?? 0,
           errorCount: errorCountByEntity.get(`${entityType}-${entityId ?? "none"}`) ?? 0,
+          noAnswerCount: noAnswerByEntity.get(`${entityType}-${entityId ?? "none"}`) ?? 0,
           runs: solution?.runs ?? [],
         }
       }),
@@ -450,11 +499,10 @@ app.get("/api/dashboard", async (req, res) => {
           return { day: row.day, cost, cumulativeCost: cumulative }
         })
       })(),
-      recent: recentResult.data.map((row) => ({
-        time: row.start_timestamp,
-        service: row.service_name ?? "unknown",
-        level: levelLabel(row.level),
-        message: row.message ?? "",
+      dailyUsageByContext: dailyUsageByContextResult.data.map((row) => ({
+        day: row.day,
+        type: row.entity_type,
+        count: Number(row.n ?? 0),
       })),
     })
   } catch (e) {
@@ -580,6 +628,11 @@ app.get("/api/usage-runs", async (req, res) => {
       const solution = outputSteps.length > 0 ? outputSteps[outputSteps.length - 1].output : null
       const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
       const failedStep = steps.find((s) => s.isError)
+
+      const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
+      const lastContentStep = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1] : null
+      const hasNoAnswer = !lastContentStep || !lastContentStep.output
+
       return {
         traceId: row.trace_id,
         timestamp: row.start_timestamp,
@@ -589,12 +642,76 @@ app.get("/api/usage-runs", async (req, res) => {
         solution,
         costUsd: costUsd > 0 ? costUsd : null,
         failureReason: failedStep?.label ?? null,
+        hasNoAnswer,
       }
     })
 
     res.json({ runs })
   } catch (e) {
     console.error("[logfire] usage runs query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/no-answer", async (req, res) => {
+  try {
+    const env = resolveEnv(req)
+    const range = resolveTimeRange(req)
+
+    const requestsResult = await logfireQuery(
+      `SELECT trace_id, start_timestamp, duration, COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, attributes->'context'->>'entity_id' as entity_id FROM (SELECT trace_id, start_timestamp, duration, attributes, ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), COALESCE(attributes->'context'->>'entity_id', '0') ORDER BY start_timestamp DESC) as rn FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}') sub WHERE rn = 1 ORDER BY start_timestamp DESC`,
+      range,
+    )
+
+    const traceIds = requestsResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
+    const answeredResult = await logfireQuery(
+      `SELECT DISTINCT trace_id FROM records WHERE trace_id IN (${sqlList(traceIds)}) AND deployment_environment = '${env}' AND ((span_name LIKE 'chat %' AND attributes->'gen_ai.output.messages' IS NOT NULL AND attributes->'gen_ai.output.messages' != '[]') OR (attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' IS NOT NULL AND attributes->>'final_result' != ''))`,
+      range,
+    )
+    const answeredTraces = new Set(answeredResult.data.map((r) => r.trace_id))
+
+    const noAnswerRows = requestsResult.data.filter((row) => !answeredTraces.has(row.trace_id))
+
+    const { stepsByTrace, exceptionTraces } = await fetchStepsByTrace(
+      noAnswerRows.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id)),
+      range,
+    )
+    const { modelByTrace, ticketByTrace } = await fetchTraceContext(
+      noAnswerRows.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id)),
+      range,
+    )
+
+    const SECURITY_LABELS = Object.values(SECURITY_JUDGE_KINDS)
+
+    const examples = noAnswerRows.map((row) => {
+      const steps = stepsByTrace.get(row.trace_id) ?? []
+      const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
+      const lastContentStep = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1] : null
+
+      let reason
+      if (contentSteps.length === 0) {
+        const judgeStep = steps.find((s) => SECURITY_LABELS.some((l) => s.label.includes(l)) || s.label.includes("LLM Judge"))
+        reason = judgeStep ? `Blocked by security judge` : "No LLM response generated"
+      } else if (exceptionTraces.has(row.trace_id)) {
+        const failedStep = steps.find((s) => s.isError)
+        reason = failedStep ? `Exception: ${failedStep.label}` : "Exception during execution"
+      } else {
+        reason = `Empty response from ${lastContentStep.label}`
+      }
+
+      return {
+        time: row.start_timestamp,
+        traceId: row.trace_id,
+        durationSec: row.duration ?? 0,
+        reason,
+        model: modelByTrace.get(row.trace_id) ?? null,
+        ticketId: ticketByTrace.get(row.trace_id) ?? null,
+      }
+    })
+
+    res.json({ examples })
+  } catch (e) {
+    console.error("[logfire] no-answer query failed:", e.message)
     res.status(e.status ?? 502).json({ error: e.message })
   }
 })
@@ -648,13 +765,36 @@ app.get("/api/day-log", async (req, res) => {
       `SELECT start_timestamp, attributes->>'anon_user_id' as user_id, attributes->'context'->>'entity_type' as entity_type, attributes->'context'->>'entity_id' as entity_id, attributes->>'model' as model FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' ORDER BY start_timestamp DESC LIMIT 200`,
       { minTimestamp, maxTimestamp },
     )
+    const entries = result.data.map((row) => ({
+      time: row.start_timestamp,
+      userId: row.user_id ?? "unknown",
+      entityType: row.entity_type ?? "none",
+      entityId: row.entity_id ?? null,
+      model: row.model ?? "unknown",
+    }))
+
+    const ticketIds = [...new Set(
+      entries.filter((e) => e.entityType === "ticket" && e.entityId).map((e) => e.entityId),
+    )]
+    const ticketTitles = new Map()
+    if (ticketIds.length > 0) {
+      try {
+        const rows = await dwhQuery(
+          `SELECT t.id, t.title FROM support.tickets t WHERE t.id IN (${ticketIds.map((_, i) => `@id${i}`).join(",")})`,
+          ticketIds.map((id, i) => ({ name: `id${i}`, type: sqlTypes.NVarChar, value: id })),
+        )
+        for (const row of rows) {
+          ticketTitles.set(String(row.id), row.title)
+        }
+      } catch (dwhErr) {
+        console.error("[dwh] ticket title fetch failed:", dwhErr.message)
+      }
+    }
+
     res.json({
-      entries: result.data.map((row) => ({
-        time: row.start_timestamp,
-        userId: row.user_id ?? "unknown",
-        entityType: row.entity_type ?? "none",
-        entityId: row.entity_id ?? null,
-        model: row.model ?? "unknown",
+      entries: entries.map((e) => ({
+        ...e,
+        ticketTitle: e.entityType === "ticket" ? (ticketTitles.get(e.entityId) ?? null) : null,
       })),
     })
   } catch (e) {
@@ -664,8 +804,13 @@ app.get("/api/day-log", async (req, res) => {
 })
 
 app.get("/api/dwh-test", (_req, res) => {
-  const host = "g-datascience-3.gamma.xcv.net"
-  const port = 1433
+  const addr = process.env.MINATO_LINK_DWH_ADDR
+  if (!addr) {
+    return res.json({ reachable: false, reason: "MINATO_LINK_DWH_ADDR not set" })
+  }
+  const lastColon = addr.lastIndexOf(":")
+  const host = addr.slice(0, lastColon)
+  const port = parseInt(addr.slice(lastColon + 1), 10)
   const socket = connect({ host, port, timeout: 5000 })
   socket.once("connect", () => {
     socket.destroy()
