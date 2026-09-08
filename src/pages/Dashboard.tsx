@@ -1654,18 +1654,36 @@ function Dashboard() {
                 <Table.HeaderCell>Time</Table.HeaderCell>
                 <Table.HeaderCell>User</Table.HeaderCell>
                 <Table.HeaderCell>Context</Table.HeaderCell>
+                <Table.HeaderCell>Ticket</Table.HeaderCell>
                 <Table.HeaderCell>Model</Table.HeaderCell>
               </Table.Row>
             </Table.Header>
             <Table.Body>
-              {dayLogModal.items.map((entry, i) => (
-                <Table.Row key={i}>
-                  <Table.Cell>{timeFormatter.format(new Date(entry.time))}</Table.Cell>
-                  <Table.Cell>{entry.userId}</Table.Cell>
-                  <Table.Cell>{entry.entityType}</Table.Cell>
-                  <Table.Cell>{entry.model}</Table.Cell>
-                </Table.Row>
-              ))}
+              {dayLogModal.items.map((entry, i) => {
+                const link = entityLink(entry.entityType, entry.entityId)
+                return (
+                  <Table.Row key={i}>
+                    <Table.Cell>{timeFormatter.format(new Date(entry.time))}</Table.Cell>
+                    <Table.Cell>{entry.userId}</Table.Cell>
+                    <Table.Cell>{entry.entityType}</Table.Cell>
+                    <Table.Cell style={{ wordBreak: 'break-word' }}>
+                      {entry.entityType === 'ticket' && entry.entityId ? (
+                        <>
+                          {link ? (
+                            <a href={link} target="_blank" rel="noreferrer">#{entry.entityId}</a>
+                          ) : (
+                            `#${entry.entityId}`
+                          )}
+                          {entry.ticketTitle ? ` · ${entry.ticketTitle}` : ''}
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </Table.Cell>
+                    <Table.Cell>{entry.model}</Table.Cell>
+                  </Table.Row>
+                )
+              })}
             </Table.Body>
           </Table>
         )}

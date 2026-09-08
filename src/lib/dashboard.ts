@@ -194,6 +194,7 @@ export interface DayLogEntry {
   entityType: string
   entityId: string | null
   model: string
+  ticketTitle: string | null
 }
 
 export async function fetchDayLog(date: string, env: Environment): Promise<DayLogEntry[]> {
