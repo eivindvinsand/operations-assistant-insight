@@ -323,6 +323,48 @@ function pivotDaily<T extends { day: string; count: number }>(
   return [...byDay.values()].sort((a, b) => String(a.label).localeCompare(String(b.label)))
 }
 
+const MAX_TREND_SERIES = 5
+const TREND_SERIES_COLORS = [
+  'var(--bfc-chill)',
+  'var(--bfc-attn)',
+  'var(--bfc-warning)',
+  'var(--bfc-success)',
+  'var(--bfc-brand)',
+]
+const TREND_OTHER_COLOR = 'var(--bfc-base-c-2)'
+
+function trendSeriesColor(type: string, index: number): string {
+  return type === 'Other' ? TREND_OTHER_COLOR : (TREND_SERIES_COLORS[index] ?? TREND_OTHER_COLOR)
+}
+
+/** A line chart can't carry more than a handful of distinguishable series (each color
+ * slot is finite, and cycling past it makes two unrelated series look identical) - so
+ * anything past the top few by total volume gets folded into one "Other" line instead
+ * of repeating a color a reader has already assigned to something else. */
+function topSeriesWithOther(
+  pivoted: Record<string, number | string>[],
+  types: string[],
+): { data: Record<string, number | string>[]; types: string[] } {
+  if (types.length <= MAX_TREND_SERIES) return { data: pivoted, types }
+
+  const totals = new Map(types.map((t) => [t, 0]))
+  for (const row of pivoted) {
+    for (const t of types) totals.set(t, (totals.get(t) ?? 0) + (Number(row[t]) || 0))
+  }
+  const ranked = [...types].sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0))
+  const top = ranked.slice(0, MAX_TREND_SERIES)
+  const rest = ranked.slice(MAX_TREND_SERIES)
+
+  const data = pivoted.map((row) => {
+    const next: Record<string, number | string> = { label: row.label }
+    for (const t of top) if (row[t] != null) next[t] = row[t]
+    const otherSum = rest.reduce((sum, t) => sum + (Number(row[t]) || 0), 0)
+    if (otherSum > 0) next.Other = otherSum
+    return next
+  })
+  return { data, types: [...top, 'Other'] }
+}
+
 const BREAKDOWN_COLORS = [
   'var(--bfc-chill)',
   'var(--bfc-attn)',
@@ -1142,7 +1184,7 @@ function IssuesTrendTabs({
               <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
               <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
               {dailyErrorsByKindTypes.map((kind, i) => (
-                <Line key={kind} type="monotone" dataKey={kind} name={kind} stroke={contextColor(kind, i)} strokeWidth={2} dot={{ r: 2 }} />
+                <Line key={kind} type="monotone" dataKey={kind} name={kind} stroke={trendSeriesColor(kind, i)} strokeWidth={2} dot={{ r: 4 }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -1160,7 +1202,7 @@ function IssuesTrendTabs({
               <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
               <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
               {dailyToolFailuresTypes.map((tool, i) => (
-                <Line key={tool} type="monotone" dataKey={tool} name={tool} stroke={contextColor(tool, i)} strokeWidth={2} dot={{ r: 2 }} />
+                <Line key={tool} type="monotone" dataKey={tool} name={tool} stroke={trendSeriesColor(tool, i)} strokeWidth={2} dot={{ r: 4 }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -1178,7 +1220,7 @@ function IssuesTrendTabs({
               <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
               <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
               {dailySecurityJudgeTypes.map((kind, i) => (
-                <Line key={kind} type="monotone" dataKey={kind} name={kind} stroke={contextColor(kind, i)} strokeWidth={2} dot={{ r: 2 }} />
+                <Line key={kind} type="monotone" dataKey={kind} name={kind} stroke={trendSeriesColor(kind, i)} strokeWidth={2} dot={{ r: 4 }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -1336,12 +1378,27 @@ function Dashboard() {
   const dailyUsageByContextTypes = [...new Set((data?.dailyUsageByContext ?? []).map((d) => d.type))]
   const dailyUsageByContextData = pivotDaily(data?.dailyUsageByContext ?? [], (r) => r.type)
 
-  const dailyErrorsByKindTypes = [...new Set((data?.dailyErrorsByKind ?? []).map((d) => d.kind))]
-  const dailyErrorsByKindData = pivotDaily(data?.dailyErrorsByKind ?? [], (r) => r.kind)
-  const dailyToolFailuresTypes = [...new Set((data?.dailyToolFailures ?? []).map((d) => d.tool))]
-  const dailyToolFailuresData = pivotDaily(data?.dailyToolFailures ?? [], (r) => r.tool)
-  const dailySecurityJudgeTypes = [...new Set((data?.dailySecurityJudge ?? []).map((d) => d.kind))]
-  const dailySecurityJudgeData = pivotDaily(data?.dailySecurityJudge ?? [], (r) => r.kind)
+  const {
+    data: dailyErrorsByKindData,
+    types: dailyErrorsByKindTypes,
+  } = topSeriesWithOther(
+    pivotDaily(data?.dailyErrorsByKind ?? [], (r) => r.kind),
+    [...new Set((data?.dailyErrorsByKind ?? []).map((d) => d.kind))],
+  )
+  const {
+    data: dailyToolFailuresData,
+    types: dailyToolFailuresTypes,
+  } = topSeriesWithOther(
+    pivotDaily(data?.dailyToolFailures ?? [], (r) => r.tool),
+    [...new Set((data?.dailyToolFailures ?? []).map((d) => d.tool))],
+  )
+  const {
+    data: dailySecurityJudgeData,
+    types: dailySecurityJudgeTypes,
+  } = topSeriesWithOther(
+    pivotDaily(data?.dailySecurityJudge ?? [], (r) => r.kind),
+    [...new Set((data?.dailySecurityJudge ?? []).map((d) => d.kind))],
+  )
 
   const USAGE_PAGE_SIZE = 10
   const usageTypes = [...new Set((data?.usage ?? []).map((u) => u.entityType))]
