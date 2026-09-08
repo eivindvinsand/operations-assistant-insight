@@ -221,6 +221,9 @@ app.get("/api/dashboard", async (req, res) => {
       dailyCostResult,
       dailyUsageByContextResult,
       dailyUserIdsResult,
+      dailyErrorsByKindResult,
+      dailyToolFailuresByToolResult,
+      dailySecurityJudgeByKindResult,
     ] = await Promise.all([
       logfireQuery(
         `SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}' AND trace_id NOT IN (SELECT DISTINCT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}')`,
@@ -313,6 +316,28 @@ app.get("/api/dashboard", async (req, res) => {
       ),
       logfireQuery(
         `SELECT date_trunc('day', start_timestamp) as day, attributes->>'anon_user_id' as user_id FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' AND attributes->>'anon_user_id' IS NOT NULL GROUP BY 1, 2 ORDER BY 1`,
+        range,
+      ),
+      logfireQuery(
+        `SELECT date_trunc('day', start_timestamp) as day, COALESCE(exception_type, attributes->>'logfire.msg_template', span_name) as kind, count(*) as n FROM records WHERE level >= 17 AND deployment_environment = '${env}' GROUP BY 1, 2 ORDER BY 1`,
+        range,
+      ),
+      logfireQuery(
+        `SELECT day, tool, sum(n) as n FROM (
+          SELECT date_trunc('day', start_timestamp) as day, attributes->'logfire.logging_args'->>0 as tool, count(*) as n FROM records
+            WHERE level >= 17 AND deployment_environment = '${env}'
+            AND attributes->>'logfire.msg_template' IN (${AGENT_TOOL_FAILURE_TEMPLATE_LIST})
+            GROUP BY 1, 2
+          UNION ALL
+          SELECT date_trunc('day', start_timestamp) as day, attributes->'logfire.logging_args'->>1 as tool, count(*) as n FROM records
+            WHERE level >= 17 AND deployment_environment = '${env}'
+            AND attributes->>'logfire.msg_template' IN (${DIRECT_TOOL_FAILURE_TEMPLATE_LIST})
+            GROUP BY 1, 2
+        ) GROUP BY 1, 2 ORDER BY 1`,
+        range,
+      ),
+      logfireQuery(
+        `SELECT date_trunc('day', start_timestamp) as day, span_name, count(*) as n FROM records WHERE span_name IN (${SECURITY_JUDGE_SPAN_LIST}) AND deployment_environment = '${env}' GROUP BY 1, 2 ORDER BY 1`,
         range,
       ),
     ])
@@ -511,6 +536,23 @@ app.get("/api/dashboard", async (req, res) => {
       dailyUsageByContext: dailyUsageByContextResult.data.map((row) => ({
         day: row.day,
         type: row.entity_type,
+        count: Number(row.n ?? 0),
+      })),
+      dailyErrorsByKind: (() => {
+        const topKinds = new Set(errorKindsResult.data.map((r) => r.kind))
+        return dailyErrorsByKindResult.data
+          .filter((row) => topKinds.has(row.kind))
+          .map((row) => ({ day: row.day, kind: row.kind, count: Number(row.n ?? 0) }))
+      })(),
+      dailyToolFailures: (() => {
+        const topTools = new Set(toolFailuresResult.data.map((r) => r.tool))
+        return dailyToolFailuresByToolResult.data
+          .filter((row) => row.tool && topTools.has(row.tool))
+          .map((row) => ({ day: row.day, tool: row.tool, count: Number(row.n ?? 0) }))
+      })(),
+      dailySecurityJudge: dailySecurityJudgeByKindResult.data.map((row) => ({
+        day: row.day,
+        kind: SECURITY_JUDGE_LABELS[row.span_name] ?? row.span_name,
         count: Number(row.n ?? 0),
       })),
     })

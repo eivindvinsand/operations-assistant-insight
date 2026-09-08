@@ -9,6 +9,7 @@ import {
   ComposedChart,
   Legend,
   Line,
+  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -305,6 +306,21 @@ const FALLBACK_CONTEXT_COLORS = [
 ]
 function contextColor(type: string, index: number): string {
   return CONTEXT_COLORS[type] ?? FALLBACK_CONTEXT_COLORS[index % FALLBACK_CONTEXT_COLORS.length]
+}
+
+/** Pivots {day, count, ...}[] rows into one row per day with one column per series key,
+ * the shape recharts wants for a multi-series bar/line chart over time. */
+function pivotDaily<T extends { day: string; count: number }>(
+  rows: T[],
+  keyOf: (row: T) => string,
+): Record<string, number | string>[] {
+  const byDay = new Map<string, Record<string, number | string>>()
+  for (const row of rows) {
+    const existing = byDay.get(row.day) ?? { label: dayFormatter.format(new Date(row.day)) }
+    existing[keyOf(row)] = row.count
+    byDay.set(row.day, existing)
+  }
+  return [...byDay.values()].sort((a, b) => String(a.label).localeCompare(String(b.label)))
 }
 
 const BREAKDOWN_COLORS = [
@@ -1077,6 +1093,101 @@ function IssuesTabs({
   )
 }
 
+function IssuesTrendTabs({
+  errors,
+  toolFailures,
+  securityJudge,
+  dailyErrorsByKindData,
+  dailyErrorsByKindTypes,
+  dailyToolFailuresData,
+  dailyToolFailuresTypes,
+  dailySecurityJudgeData,
+  dailySecurityJudgeTypes,
+}: {
+  errors: DashboardData['errors']
+  toolFailures: DashboardData['toolFailures']
+  securityJudge: DashboardData['securityJudge']
+  dailyErrorsByKindData: Record<string, number | string>[]
+  dailyErrorsByKindTypes: string[]
+  dailyToolFailuresData: Record<string, number | string>[]
+  dailyToolFailuresTypes: string[]
+  dailySecurityJudgeData: Record<string, number | string>[]
+  dailySecurityJudgeTypes: string[]
+}) {
+  const [tab, setTab] = useState<'errors' | 'toolFailures' | 'security'>('errors')
+  return (
+    <div>
+      <Inline style={{ marginBottom: 16, justifyContent: 'flex-end' }}>
+        <Button.Group>
+          <Button active={tab === 'errors'} onClick={() => setTab('errors')}>
+            <Icon icon={faTriangleExclamation} marginRight /> Errors ({errors.total})
+          </Button>
+          <Button active={tab === 'toolFailures'} onClick={() => setTab('toolFailures')}>
+            <Icon icon={faWrench} marginRight /> Tool failures ({toolFailures.length})
+          </Button>
+          <Button active={tab === 'security'} onClick={() => setTab('security')}>
+            <Icon icon={faShieldHalved} marginRight /> Security blocks ({securityJudge.total})
+          </Button>
+        </Button.Group>
+      </Inline>
+      {tab === 'errors' && (
+        dailyErrorsByKindData.length === 0 ? (
+          <Message state="neutral" noIcon>No errors recorded.</Message>
+        ) : (
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={dailyErrorsByKindData} margin={{ left: -10 }}>
+              <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
+              <XAxis axisLine={false} tickLine={false} dataKey="label" tick={{ fill: 'var(--bfc-base-c-2)' }} dy={8} />
+              <YAxis axisLine={false} tickLine={false} allowDecimals={false} tick={{ fill: 'var(--bfc-base-c-2)' }} />
+              <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
+              <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
+              {dailyErrorsByKindTypes.map((kind, i) => (
+                <Line key={kind} type="monotone" dataKey={kind} name={kind} stroke={contextColor(kind, i)} strokeWidth={2} dot={{ r: 2 }} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )
+      )}
+      {tab === 'toolFailures' && (
+        dailyToolFailuresData.length === 0 ? (
+          <Message state="neutral" noIcon>No tool call failures recorded.</Message>
+        ) : (
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={dailyToolFailuresData} margin={{ left: -10 }}>
+              <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
+              <XAxis axisLine={false} tickLine={false} dataKey="label" tick={{ fill: 'var(--bfc-base-c-2)' }} dy={8} />
+              <YAxis axisLine={false} tickLine={false} allowDecimals={false} tick={{ fill: 'var(--bfc-base-c-2)' }} />
+              <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
+              <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
+              {dailyToolFailuresTypes.map((tool, i) => (
+                <Line key={tool} type="monotone" dataKey={tool} name={tool} stroke={contextColor(tool, i)} strokeWidth={2} dot={{ r: 2 }} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )
+      )}
+      {tab === 'security' && (
+        dailySecurityJudgeData.length === 0 ? (
+          <Message state="neutral" noIcon>No blocks recorded.</Message>
+        ) : (
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={dailySecurityJudgeData} margin={{ left: -10 }}>
+              <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
+              <XAxis axisLine={false} tickLine={false} dataKey="label" tick={{ fill: 'var(--bfc-base-c-2)' }} dy={8} />
+              <YAxis axisLine={false} tickLine={false} allowDecimals={false} tick={{ fill: 'var(--bfc-base-c-2)' }} />
+              <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
+              <Legend wrapperStyle={{ fontSize: 12 }} iconType="circle" />
+              {dailySecurityJudgeTypes.map((kind, i) => (
+                <Line key={kind} type="monotone" dataKey={kind} name={kind} stroke={contextColor(kind, i)} strokeWidth={2} dot={{ r: 2 }} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )
+      )}
+    </div>
+  )
+}
+
 function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1223,19 +1334,14 @@ function Dashboard() {
   }))
 
   const dailyUsageByContextTypes = [...new Set((data?.dailyUsageByContext ?? []).map((d) => d.type))]
-  const dailyUsageByContextData = (() => {
-    const byDay = new Map<string, Record<string, number | string>>()
-    for (const row of data?.dailyUsageByContext ?? []) {
-      const existing = byDay.get(row.day) ?? { label: dayFormatter.format(new Date(row.day)) }
-      existing[row.type] = row.count
-      byDay.set(row.day, existing)
-    }
-    return [...byDay.values()].sort((a, b) => {
-      const aLabel = String(a.label)
-      const bLabel = String(b.label)
-      return aLabel.localeCompare(bLabel)
-    })
-  })()
+  const dailyUsageByContextData = pivotDaily(data?.dailyUsageByContext ?? [], (r) => r.type)
+
+  const dailyErrorsByKindTypes = [...new Set((data?.dailyErrorsByKind ?? []).map((d) => d.kind))]
+  const dailyErrorsByKindData = pivotDaily(data?.dailyErrorsByKind ?? [], (r) => r.kind)
+  const dailyToolFailuresTypes = [...new Set((data?.dailyToolFailures ?? []).map((d) => d.tool))]
+  const dailyToolFailuresData = pivotDaily(data?.dailyToolFailures ?? [], (r) => r.tool)
+  const dailySecurityJudgeTypes = [...new Set((data?.dailySecurityJudge ?? []).map((d) => d.kind))]
+  const dailySecurityJudgeData = pivotDaily(data?.dailySecurityJudge ?? [], (r) => r.kind)
 
   const USAGE_PAGE_SIZE = 10
   const usageTypes = [...new Set((data?.usage ?? []).map((u) => u.entityType))]
@@ -1341,21 +1447,37 @@ function Dashboard() {
             </SectionBox>
           </Grid>
 
-          <SectionBox title="Issues">
-            <IssuesTabs
-              errors={data.errors}
-              toolFailures={data.toolFailures}
-              securityJudge={data.securityJudge}
-              toolFailureCategory={toolFailureCategory}
-              setToolFailureCategory={setToolFailureCategory}
-              agentToolFailures={agentToolFailures}
-              directToolFailures={directToolFailures}
-              selectedToolFailures={selectedToolFailures}
-              openErrorModal={openErrorModal}
-              openToolFailureModal={openToolFailureModal}
-              openSecurityJudgeModal={openSecurityJudgeModal}
-            />
-          </SectionBox>
+          <Grid cols={1} large={2} gap={24}>
+            <SectionBox title="Issues">
+              <IssuesTabs
+                errors={data.errors}
+                toolFailures={data.toolFailures}
+                securityJudge={data.securityJudge}
+                toolFailureCategory={toolFailureCategory}
+                setToolFailureCategory={setToolFailureCategory}
+                agentToolFailures={agentToolFailures}
+                directToolFailures={directToolFailures}
+                selectedToolFailures={selectedToolFailures}
+                openErrorModal={openErrorModal}
+                openToolFailureModal={openToolFailureModal}
+                openSecurityJudgeModal={openSecurityJudgeModal}
+              />
+            </SectionBox>
+
+            <SectionBox title="Issues over time">
+              <IssuesTrendTabs
+                errors={data.errors}
+                toolFailures={data.toolFailures}
+                securityJudge={data.securityJudge}
+                dailyErrorsByKindData={dailyErrorsByKindData}
+                dailyErrorsByKindTypes={dailyErrorsByKindTypes}
+                dailyToolFailuresData={dailyToolFailuresData}
+                dailyToolFailuresTypes={dailyToolFailuresTypes}
+                dailySecurityJudgeData={dailySecurityJudgeData}
+                dailySecurityJudgeTypes={dailySecurityJudgeTypes}
+              />
+            </SectionBox>
+          </Grid>
 
           <SectionBox title="Conversation log">
             <Inline align="center" gap={8} style={{ marginBottom: 16, flexWrap: 'wrap' }}>

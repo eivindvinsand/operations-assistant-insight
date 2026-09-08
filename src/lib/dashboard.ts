@@ -84,6 +84,9 @@ export interface DashboardData {
   }[]
   dailyCost: { day: string; cost: number; cumulativeCost: number }[]
   dailyUsageByContext: { day: string; type: string; count: number }[]
+  dailyErrorsByKind: { day: string; kind: string; count: number }[]
+  dailyToolFailures: { day: string; tool: string; count: number }[]
+  dailySecurityJudge: { day: string; kind: string; count: number }[]
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
