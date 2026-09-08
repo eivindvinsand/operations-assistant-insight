@@ -550,6 +550,8 @@ function StepOutput({ step }: { step: RunStep }) {
       {step.output ? (
         step.type === 'agent' || step.type === 'chat' ? (
           <Markdown text={step.output} />
+        ) : step.type === 'tool' ? (
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>{step.output}</pre>
         ) : (
           <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{step.output}</p>
         )

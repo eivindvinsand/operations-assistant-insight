@@ -104,7 +104,16 @@ function classifyStep(row) {
     return { type: "chat", label: `LLM call · ${model}`, output: extractChatOutput(attributes) }
   }
   if (spanName.startsWith("tools/call ")) {
-    return { type: "tool", label: spanName.slice(11), output: null }
+    // `logfire.*` and `code.*` are Logfire/OTel's own span metadata, not the tool call's actual
+    // payload — everything else here is whatever the tool call itself logged (arguments, result).
+    const payload = Object.fromEntries(
+      Object.entries(attributes).filter(([key]) => !key.startsWith("logfire.") && !key.startsWith("code.")),
+    )
+    return {
+      type: "tool",
+      label: spanName.slice(11),
+      output: Object.keys(payload).length > 0 ? JSON.stringify(payload, null, 2) : null,
+    }
   }
   if (spanName === "solution_agent_finished") {
     return {
@@ -615,7 +624,7 @@ app.get("/api/usage-runs", async (req, res) => {
       : `attributes->'context'->>'entity_id' IS NULL`
 
     const requestsResult = await logfireQuery(
-      `SELECT trace_id, start_timestamp, duration FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' AND COALESCE(attributes->'context'->>'entity_type', 'none') = '${entityType}' AND ${entityIdFilter} ORDER BY start_timestamp DESC LIMIT 20`,
+      `SELECT trace_id, start_timestamp, duration FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' AND COALESCE(attributes->'context'->>'entity_type', 'none') = '${entityType}' AND ${entityIdFilter} ORDER BY start_timestamp DESC LIMIT 1000`,
       range,
     )
 
