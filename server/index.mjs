@@ -805,11 +805,11 @@ app.get("/api/day-log", async (req, res) => {
 
 app.get("/api/ticket-info", async (req, res) => {
   try {
-    const referenceNumber = String(req.query.ticketId ?? "")
-    if (!referenceNumber) return res.status(400).json({ error: "ticketId is required" })
+    const ticketId = parseInt(String(req.query.ticketId ?? ""), 10)
+    if (!Number.isFinite(ticketId)) return res.status(400).json({ error: "ticketId must be numeric" })
     const rows = await dwhQuery(
-      `SELECT ticket_id, reference_number, ticket_title, category_name, category_fullname, implementation_name, company_name, intility_worker_fullname AS owner, ticket_status, ticket_priority FROM support.tickets WHERE reference_number = @ticketId`,
-      [{ name: "ticketId", type: sqlTypes.NVarChar, value: referenceNumber }],
+      `SELECT ticket_id, reference_number, ticket_title, category_name, category_fullname, implementation_name, company_name, intility_worker_fullname AS owner, ticket_status, ticket_priority FROM customer_inquiries.tickets_last_five_years WHERE ticket_id = @ticketId`,
+      [{ name: "ticketId", type: sqlTypes.Int, value: ticketId }],
     )
     const row = rows[0]
     res.json({
