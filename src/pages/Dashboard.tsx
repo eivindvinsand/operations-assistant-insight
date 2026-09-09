@@ -1139,27 +1139,31 @@ function IssuesTrendTabs({
   errors,
   toolFailures,
   securityJudge,
+  noAnswerPercent,
   dailyErrorsByKindData,
   dailyErrorsByKindTypes,
   dailyToolFailuresData,
   dailyToolFailuresTypes,
   dailySecurityJudgeData,
   dailySecurityJudgeTypes,
+  dailyNoAnswerData,
 }: {
   errors: DashboardData['errors']
   toolFailures: DashboardData['toolFailures']
   securityJudge: DashboardData['securityJudge']
+  noAnswerPercent: number
   dailyErrorsByKindData: Record<string, number | string>[]
   dailyErrorsByKindTypes: string[]
   dailyToolFailuresData: Record<string, number | string>[]
   dailyToolFailuresTypes: string[]
   dailySecurityJudgeData: Record<string, number | string>[]
   dailySecurityJudgeTypes: string[]
+  dailyNoAnswerData: { label: string; day: string; percent: number }[]
 }) {
-  const [tab, setTab] = useState<'errors' | 'toolFailures' | 'security'>('errors')
+  const [tab, setTab] = useState<'errors' | 'toolFailures' | 'security' | 'noAnswer'>('errors')
   return (
     <div>
-      <Inline style={{ marginBottom: 16, justifyContent: 'flex-end' }}>
+      <Inline style={{ marginBottom: 16, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
         <Button.Group>
           <Button active={tab === 'errors'} onClick={() => setTab('errors')}>
             <Icon icon={faTriangleExclamation} marginRight /> Errors ({errors.total})
@@ -1169,6 +1173,9 @@ function IssuesTrendTabs({
           </Button>
           <Button active={tab === 'security'} onClick={() => setTab('security')}>
             <Icon icon={faShieldHalved} marginRight /> Security blocks ({securityJudge.total})
+          </Button>
+          <Button active={tab === 'noAnswer'} onClick={() => setTab('noAnswer')}>
+            <Icon icon={faTriangleExclamation} marginRight /> Failed responses ({noAnswerPercent.toFixed(1)}%)
           </Button>
         </Button.Group>
       </Inline>
@@ -1222,6 +1229,26 @@ function IssuesTrendTabs({
               {dailySecurityJudgeTypes.map((kind, i) => (
                 <Line key={kind} type="monotone" dataKey={kind} name={kind} stroke={trendSeriesColor(kind, i)} strokeWidth={2} dot={{ r: 4 }} />
               ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )
+      )}
+      {tab === 'noAnswer' && (
+        dailyNoAnswerData.length === 0 ? (
+          <Message state="neutral" noIcon>No chat requests recorded.</Message>
+        ) : (
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={dailyNoAnswerData} margin={{ left: -10 }}>
+              <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
+              <XAxis axisLine={false} tickLine={false} dataKey="label" tick={{ fill: 'var(--bfc-base-c-2)' }} dy={8} />
+              <YAxis axisLine={false} tickLine={false} tick={{ fill: 'var(--bfc-base-c-2)' }} tickFormatter={(v) => `${v}%`} />
+              <Tooltip
+                contentStyle={tooltipContentStyle}
+                itemStyle={tooltipItemStyle}
+                labelStyle={tooltipLabelStyle}
+                formatter={(v) => [`${Number(v).toFixed(1)}%`, 'Failed responses']}
+              />
+              <Line type="monotone" dataKey="percent" name="Failed responses" stroke="var(--bfc-alert)" strokeWidth={2} dot={{ r: 4 }} />
             </LineChart>
           </ResponsiveContainer>
         )
@@ -1399,6 +1426,10 @@ function Dashboard() {
     pivotDaily(data?.dailySecurityJudge ?? [], (r) => r.kind),
     [...new Set((data?.dailySecurityJudge ?? []).map((d) => d.kind))],
   )
+  const dailyNoAnswerData = (data?.dailyNoAnswer ?? []).map((point) => ({
+    ...point,
+    label: dayFormatter.format(new Date(point.day)),
+  }))
 
   const USAGE_PAGE_SIZE = 10
   const usageTypes = [...new Set((data?.usage ?? []).map((u) => u.entityType))]
@@ -1526,12 +1557,14 @@ function Dashboard() {
                 errors={data.errors}
                 toolFailures={data.toolFailures}
                 securityJudge={data.securityJudge}
+                noAnswerPercent={data.totals.noAnswerPercent}
                 dailyErrorsByKindData={dailyErrorsByKindData}
                 dailyErrorsByKindTypes={dailyErrorsByKindTypes}
                 dailyToolFailuresData={dailyToolFailuresData}
                 dailyToolFailuresTypes={dailyToolFailuresTypes}
                 dailySecurityJudgeData={dailySecurityJudgeData}
                 dailySecurityJudgeTypes={dailySecurityJudgeTypes}
+                dailyNoAnswerData={dailyNoAnswerData}
               />
             </SectionBox>
           </Grid>

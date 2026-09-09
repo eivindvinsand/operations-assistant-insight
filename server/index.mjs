@@ -50,6 +50,10 @@ function sqlList(values) {
 
 const SKIPPED_SPANS = new Set(["POST /api/v2/chat", "OPTIONS /api/v2/chat", "chat.request"])
 
+/** A trace counts as "answered" if it produced a chat message or a solution-agent
+ * final result; used everywhere a chat.request is checked for a real response. */
+const ANSWERED_CONDITION_SQL = `((span_name LIKE 'chat %' AND attributes->'gen_ai.output.messages' IS NOT NULL AND attributes->'gen_ai.output.messages' != '[]') OR (attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' IS NOT NULL AND attributes->>'final_result' != ''))`
+
 /** Tool call failures come in two shapes: normal agent-routed MCP calls, and "direct" calls that
  * bypass the agent (used by retrieve_initial_data's background prefetches). Each shape uses a
  * different logging_args layout, so they're queried and labeled separately. */
@@ -224,6 +228,8 @@ app.get("/api/dashboard", async (req, res) => {
       dailyErrorsByKindResult,
       dailyToolFailuresByToolResult,
       dailySecurityJudgeByKindResult,
+      allEntitiesLatestResult,
+      dailyNoAnswerResult,
     ] = await Promise.all([
       logfireQuery(
         `SELECT approx_percentile_cont(duration, 0.5) as median_dur, avg(duration) as avg_dur FROM records WHERE attributes->>'gen_ai.operation.name' = 'invoke_agent' AND deployment_environment = '${env}' AND trace_id NOT IN (SELECT DISTINCT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}')`,
@@ -279,7 +285,7 @@ app.get("/api/dashboard", async (req, res) => {
             MAX(start_timestamp) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id') as last_seen,
             ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id' ORDER BY start_timestamp DESC) as rn
           FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
-        ) WHERE rn = 1 ORDER BY last_seen DESC LIMIT 100`,
+        ) WHERE rn = 1 ORDER BY last_seen DESC LIMIT 1000`,
         range,
       ),
       logfireQuery(
@@ -340,22 +346,53 @@ app.get("/api/dashboard", async (req, res) => {
         `SELECT date_trunc('day', start_timestamp) as day, span_name, count(*) as n FROM records WHERE span_name IN (${SECURITY_JUDGE_SPAN_LIST}) AND deployment_environment = '${env}' GROUP BY 1, 2 ORDER BY 1`,
         range,
       ),
+      // Separate from usageResult (the conversation-log table), so the failed-responses rate below
+      // isn't tied to whatever cap that table happens to use for display purposes.
+      logfireQuery(
+        `SELECT entity_type, entity_id, trace_id FROM (
+          SELECT
+            COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
+            attributes->'context'->>'entity_id' as entity_id,
+            trace_id,
+            start_timestamp,
+            ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), COALESCE(attributes->'context'->>'entity_id', '0') ORDER BY start_timestamp DESC) as rn
+          FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
+        ) WHERE rn = 1 LIMIT 1000`,
+        range,
+      ),
+      // Daily failed-response rate for the trend chart, aggregated in SQL so the per-day counts
+      // aren't silently capped by the query API's 1000-row response ceiling once a range holds
+      // more than 1000 chat.request spans (that previously made single days look far worse or
+      // better than they actually were, since rows were returned with no ORDER BY to guarantee
+      // an even spread across days).
+      logfireQuery(
+        `SELECT date_trunc('day', r.start_timestamp) as day,
+          count(DISTINCT r.trace_id) as total,
+          count(DISTINCT CASE WHEN a.trace_id IS NULL THEN r.trace_id END) as no_answer
+        FROM records r
+        LEFT JOIN (SELECT DISTINCT trace_id FROM records WHERE deployment_environment = '${env}' AND ${ANSWERED_CONDITION_SQL}) a ON a.trace_id = r.trace_id
+        WHERE r.span_name = 'chat.request' AND r.deployment_environment = '${env}'
+        GROUP BY 1 ORDER BY 1`,
+        range,
+      ),
     ])
 
-    const lastTraceIds = usageResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
+    // Headline failed-responses rate: every entity's latest chat.request in range (not just the
+    // 100 shown in the conversation-log table), so it reflects the whole selected time range.
+    const allEntityTraceIds = allEntitiesLatestResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
     const answeredTracesResult = await logfireQuery(
-      `SELECT DISTINCT trace_id FROM records WHERE trace_id IN (${sqlList(lastTraceIds)}) AND deployment_environment = '${env}' AND ((span_name LIKE 'chat %' AND attributes->'gen_ai.output.messages' IS NOT NULL AND attributes->'gen_ai.output.messages' != '[]') OR (attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' IS NOT NULL AND attributes->>'final_result' != ''))`,
+      `SELECT DISTINCT trace_id FROM records WHERE trace_id IN (${sqlList(allEntityTraceIds)}) AND deployment_environment = '${env}' AND ${ANSWERED_CONDITION_SQL}`,
       range,
     )
     const answeredTraces = new Set(answeredTracesResult.data.map((r) => r.trace_id))
     const noAnswerByEntity = new Map()
-    for (const row of usageResult.data) {
+    for (const row of allEntitiesLatestResult.data) {
       const entityId = row.entity_id && row.entity_id !== "0" ? row.entity_id : null
       const key = `${row.entity_type}-${entityId ?? "none"}`
       noAnswerByEntity.set(key, answeredTraces.has(row.trace_id) ? 0 : 1)
     }
     const noAnswerCount = [...noAnswerByEntity.values()].filter((v) => v === 1).length
-    const totalEntities = usageResult.data.length
+    const totalEntities = allEntitiesLatestResult.data.length
     const noAnswerPercent = totalEntities > 0 ? (noAnswerCount / totalEntities) * 100 : 0
 
     const allTickets = groupRunsByTicket(solutionRunsResult.data)
@@ -555,6 +592,10 @@ app.get("/api/dashboard", async (req, res) => {
         kind: SECURITY_JUDGE_LABELS[row.span_name] ?? row.span_name,
         count: Number(row.n ?? 0),
       })),
+      dailyNoAnswer: dailyNoAnswerResult.data.map((row) => {
+        const total = Number(row.total ?? 0)
+        return { day: row.day, percent: total > 0 ? (Number(row.no_answer ?? 0) / total) * 100 : 0 }
+      }),
     })
   } catch (e) {
     console.error("[logfire] dashboard query failed:", e.message)
@@ -716,7 +757,7 @@ app.get("/api/no-answer", async (req, res) => {
 
     const traceIds = requestsResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
     const answeredResult = await logfireQuery(
-      `SELECT DISTINCT trace_id FROM records WHERE trace_id IN (${sqlList(traceIds)}) AND deployment_environment = '${env}' AND ((span_name LIKE 'chat %' AND attributes->'gen_ai.output.messages' IS NOT NULL AND attributes->'gen_ai.output.messages' != '[]') OR (attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' IS NOT NULL AND attributes->>'final_result' != ''))`,
+      `SELECT DISTINCT trace_id FROM records WHERE trace_id IN (${sqlList(traceIds)}) AND deployment_environment = '${env}' AND ${ANSWERED_CONDITION_SQL}`,
       range,
     )
     const answeredTraces = new Set(answeredResult.data.map((r) => r.trace_id))
