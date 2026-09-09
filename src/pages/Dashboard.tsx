@@ -1158,7 +1158,7 @@ function IssuesTrendTabs({
   dailyToolFailuresTypes: string[]
   dailySecurityJudgeData: Record<string, number | string>[]
   dailySecurityJudgeTypes: string[]
-  dailyNoAnswerData: { label: string; day: string; percent: number }[]
+  dailyNoAnswerData: { label: string; day: string; total: number; noAnswer: number; percent: number }[]
 }) {
   const [tab, setTab] = useState<'errors' | 'toolFailures' | 'security' | 'noAnswer'>('errors')
   return (
@@ -1246,7 +1246,10 @@ function IssuesTrendTabs({
                 contentStyle={tooltipContentStyle}
                 itemStyle={tooltipItemStyle}
                 labelStyle={tooltipLabelStyle}
-                formatter={(v) => [`${Number(v).toFixed(1)}%`, 'Failed responses']}
+                formatter={(v, _name, props) => [
+                  `${Number(v).toFixed(1)}% (${props.payload.noAnswer} of ${props.payload.total})`,
+                  'Failed responses',
+                ]}
               />
               <Line type="monotone" dataKey="percent" name="Failed responses" stroke="var(--bfc-alert)" strokeWidth={2} dot={{ r: 4 }} />
             </LineChart>

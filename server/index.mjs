@@ -594,7 +594,8 @@ app.get("/api/dashboard", async (req, res) => {
       })),
       dailyNoAnswer: dailyNoAnswerResult.data.map((row) => {
         const total = Number(row.total ?? 0)
-        return { day: row.day, percent: total > 0 ? (Number(row.no_answer ?? 0) / total) * 100 : 0 }
+        const noAnswer = Number(row.no_answer ?? 0)
+        return { day: row.day, total, noAnswer, percent: total > 0 ? (noAnswer / total) * 100 : 0 }
       }),
     })
   } catch (e) {
