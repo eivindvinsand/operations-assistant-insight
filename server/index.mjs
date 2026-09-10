@@ -240,14 +240,14 @@ async function fetchAllSolutionRunsByTicket(env) {
 
 const DWH_BATCH_SIZE = 500
 
-/** Looks up category/product/company for a batch of reference numbers, chunked to stay well
- * under SQL Server's ~2100 parameter limit per query. */
+/** Looks up category/product/company/closed-time for a batch of reference numbers, chunked to
+ * stay well under SQL Server's ~2100 parameter limit per query. */
 async function fetchTicketMetaByReference(referenceNumbers) {
   const metaByRef = new Map()
   for (let i = 0; i < referenceNumbers.length; i += DWH_BATCH_SIZE) {
     const batch = referenceNumbers.slice(i, i + DWH_BATCH_SIZE)
     const rows = await dwhQuery(
-      `SELECT reference_number, category_name, category_fullname, implementation_name, company_name FROM customer_inquiries.tickets_last_five_years WHERE reference_number IN (${batch.map((_, j) => `@ref${j}`).join(",")})`,
+      `SELECT reference_number, category_name, category_fullname, implementation_name, company_name, ticket_time_to_closed_sec FROM customer_inquiries.tickets_last_five_years WHERE reference_number IN (${batch.map((_, j) => `@ref${j}`).join(",")})`,
       batch.map((ref, j) => ({ name: `ref${j}`, type: sqlTypes.NVarChar, value: ref })),
     )
     for (const row of rows) {
@@ -256,18 +256,37 @@ async function fetchTicketMetaByReference(referenceNumbers) {
         categoryFullName: row.category_fullname ?? null,
         implementationName: row.implementation_name ?? null,
         companyName: row.company_name ?? null,
+        closeDays: row.ticket_time_to_closed_sec != null ? Number(row.ticket_time_to_closed_sec) / 86400 : null,
       })
     }
   }
   return metaByRef
 }
 
+/** Looks up the ticket cluster each reference number belongs to (support.ticket_cluster_members),
+ * chunked the same way as fetchTicketMetaByReference. Tickets outside any cluster are absent. */
+async function fetchClusterIdByReference(referenceNumbers) {
+  const clusterByRef = new Map()
+  for (let i = 0; i < referenceNumbers.length; i += DWH_BATCH_SIZE) {
+    const batch = referenceNumbers.slice(i, i + DWH_BATCH_SIZE)
+    const rows = await dwhQuery(
+      `SELECT reference_number, cluster_id FROM support.ticket_cluster_members WHERE reference_number IN (${batch.map((_, j) => `@ref${j}`).join(",")})`,
+      batch.map((ref, j) => ({ name: `ref${j}`, type: sqlTypes.NVarChar, value: ref })),
+    )
+    for (const row of rows) clusterByRef.set(row.reference_number, row.cluster_id)
+  }
+  return clusterByRef
+}
+
 /** One row per ticket the solution agent has ever run against, with its DWH category/product/
- * company (falling back to "Ukjent" when the ticket isn't found in the DWH extract). */
+ * company/cluster (falling back to "Ukjent" when the ticket isn't found in the DWH extract). */
 async function buildSolutionAgentTickets(env) {
   const byTicket = await fetchAllSolutionRunsByTicket(env)
   const referenceNumbers = [...byTicket.keys()]
-  const metaByRef = await fetchTicketMetaByReference(referenceNumbers)
+  const [metaByRef, clusterByRef] = await Promise.all([
+    fetchTicketMetaByReference(referenceNumbers),
+    fetchClusterIdByReference(referenceNumbers),
+  ])
 
   return referenceNumbers.map((ref) => {
     const stats = byTicket.get(ref)
@@ -280,31 +299,213 @@ async function buildSolutionAgentTickets(env) {
       category: meta?.categoryFullName ?? meta?.categoryName ?? UNKNOWN_GROUP,
       product: meta?.implementationName ?? UNKNOWN_GROUP,
       company: meta?.companyName ?? UNKNOWN_GROUP,
+      clusterId: clusterByRef.get(ref) ?? null,
+      closeDays: meta?.closeDays ?? null,
     }
   })
 }
 
-function groupTicketsBy(tickets, key) {
+/** Standard median (linear interpolation between the two middle values for an even count),
+ * matching SQL Server's PERCENTILE_CONT(0.5) so the AI-side and DWH-side numbers agree. */
+function medianOf(values) {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+}
+
+/** Groups tickets by a field, keeping the raw ticket list per group (used both for the group
+ * summary aggregation below and for confidence sampling, which needs the actual reference numbers). */
+function groupTicketsRaw(tickets, key) {
   const groups = new Map()
   for (const t of tickets) {
     const k = t[key] || UNKNOWN_GROUP
-    if (!groups.has(k)) groups.set(k, { key: k, ticketCount: 0, runCount: 0, durationSum: 0 })
-    const g = groups.get(k)
-    g.ticketCount += 1
-    g.runCount += t.runs
-    g.durationSum += t.avgDurationSec * t.runs
+    if (!groups.has(k)) groups.set(k, [])
+    groups.get(k).push(t)
   }
-  return [...groups.values()]
-    .map((g) => ({
-      key: g.key,
-      ticketCount: g.ticketCount,
-      runCount: g.runCount,
-      avgDurationSec: g.runCount > 0 ? g.durationSum / g.runCount : 0,
-    }))
+  return groups
+}
+
+function groupTicketsBy(tickets, key) {
+  const raw = groupTicketsRaw(tickets, key)
+  return [...raw.entries()]
+    .map(([k, groupTickets]) => {
+      const runCount = groupTickets.reduce((sum, t) => sum + t.runs, 0)
+      const durationSum = groupTickets.reduce((sum, t) => sum + t.avgDurationSec * t.runs, 0)
+      const closeDays = groupTickets.map((t) => t.closeDays).filter((d) => d != null)
+      return {
+        key: k,
+        label: k,
+        ticketCount: groupTickets.length,
+        runCount,
+        avgDurationSec: runCount > 0 ? durationSum / runCount : 0,
+        medianCloseDaysAi: medianOf(closeDays),
+      }
+    })
     .sort((a, b) => b.ticketCount - a.ticketCount)
 }
 
-const SOLUTION_DIMENSIONS = { category: "category", product: "product", company: "company" }
+const SOLUTION_DIMENSIONS = { category: "category", product: "product", company: "company", cluster: "clusterId" }
+
+// Confidence is parsed from free-text solution markdown (see parseConfidence below), so it can
+// only be estimated from a sample of runs per group, not queried directly. This sample is smaller
+// than SOLUTION_SAMPLE_RUN_LIMIT (used for the single-group detail modal) because it's taken once
+// per group in a dimension - with dozens of groups, a 50-run sample per group would multiply into
+// far too many Logfire round trips for a table that's supposed to load in a couple of seconds.
+const SOLUTION_TABLE_SAMPLE_LIMIT = 15
+// Keeps each fetchStepsByTrace call's response comfortably under Logfire's 1000-row cap, assuming
+// a typical solution-agent trace produces well under 15 spans.
+const STEPS_CHUNK_SIZE = 60
+
+/** fetchStepsByTrace in one call, chunked to stay under Logfire's per-query row cap when sampling
+ * confidence across many groups at once (see computeConfidenceForGroups). */
+async function fetchStepsByTraceChunked(traceIds, range) {
+  const stepsByTrace = new Map()
+  const chunks = []
+  for (let i = 0; i < traceIds.length; i += STEPS_CHUNK_SIZE) chunks.push(traceIds.slice(i, i + STEPS_CHUNK_SIZE))
+  const results = await Promise.all(chunks.map((chunk) => fetchStepsByTrace(chunk, range)))
+  for (const r of results) {
+    for (const [traceId, steps] of r.stepsByTrace) stepsByTrace.set(traceId, steps)
+  }
+  return stepsByTrace
+}
+
+/** Estimates the confidence-level split for every group in a dimension from a bounded sample of
+ * each group's most recent runs, in two batched passes (one query per group for sample trace ids,
+ * then one shared chunked pass for all their steps) rather than one query per group per pass. */
+async function computeConfidenceForGroups(env, groupsMap) {
+  const entries = [...groupsMap.entries()]
+  const sampleLists = await Promise.all(
+    entries.map(([, groupTickets]) => {
+      const refs = groupTickets.map((t) => t.reference)
+      if (refs.length === 0) return Promise.resolve([])
+      return logfireQuery(
+        `SELECT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) ORDER BY start_timestamp DESC LIMIT ${SOLUTION_TABLE_SAMPLE_LIMIT}`,
+        SOLUTION_ALL_TIME_RANGE,
+      ).then((r) => r.data.map((row) => row.trace_id).filter((id) => TRACE_ID_RE.test(id)))
+    }),
+  )
+
+  const stepsByTrace = await fetchStepsByTraceChunked(sampleLists.flat(), SOLUTION_ALL_TIME_RANGE)
+
+  const result = new Map()
+  entries.forEach(([key], i) => {
+    const traceIds = sampleLists[i]
+    const counts = { high: 0, medium: 0, low: 0, unknown: 0 }
+    for (const traceId of traceIds) {
+      const steps = stepsByTrace.get(traceId) ?? []
+      const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
+      const solution = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1].output : null
+      counts[parseConfidence(solution) ?? "unknown"] += 1
+    }
+    const sampledRuns = traceIds.length
+    result.set(key, {
+      highPercent: sampledRuns > 0 ? (counts.high / sampledRuns) * 100 : null,
+      mediumPercent: sampledRuns > 0 ? (counts.medium / sampledRuns) * 100 : null,
+      sampledRuns,
+    })
+  })
+  return result
+}
+
+/** Looks up display name + hierarchy for a batch of cluster ids (support.ticket_cluster_groups /
+ * ticket_cluster_hierarchy), chunked like the reference-number lookups above. */
+async function fetchClusterNames(clusterIds) {
+  const namesByCluster = new Map()
+  for (let i = 0; i < clusterIds.length; i += DWH_BATCH_SIZE) {
+    const batch = clusterIds.slice(i, i + DWH_BATCH_SIZE)
+    const rows = await dwhQuery(
+      `SELECT cg.cluster_id, cg.label AS cluster_name, ch.hierarchy_name
+       FROM support.ticket_cluster_groups cg
+       LEFT JOIN support.ticket_cluster_hierarchy ch ON ch.cluster_id = cg.cluster_id
+       WHERE cg.cluster_id IN (${batch.map((_, j) => `@c${j}`).join(",")})`,
+      batch.map((id, j) => ({ name: `c${j}`, type: sqlTypes.Int, value: id })),
+    )
+    for (const row of rows) {
+      namesByCluster.set(row.cluster_id, {
+        clusterName: row.cluster_name ?? null,
+        hierarchyName: row.hierarchy_name ?? null,
+      })
+    }
+  }
+  return namesByCluster
+}
+
+/** For each of the given clusters, counts tickets NOT touched by the solution agent and their
+ * median time-to-closed, so the table can compare "AI-handled" vs. "everything else" per cluster
+ * (mirrors the median_values/cluster_summary shape of the example DWH query, restricted to the
+ * complement of our own reference-number set instead of an ad-hoc input list). */
+async function fetchOtherClusterStats(clusterIds, aiReferenceNumbers) {
+  // reference_number is always a plain digit string here (sourced from Logfire attributes, never
+  // user input) - validated before being inlined as a literal, since there are too many of them to
+  // pass as individually bound parameters.
+  const validRefs = aiReferenceNumbers.filter((r) => /^\d+$/.test(r))
+  const excludeList = validRefs.length > 0 ? sqlList(validRefs) : "''"
+  const statsByCluster = new Map()
+  for (let i = 0; i < clusterIds.length; i += DWH_BATCH_SIZE) {
+    const batch = clusterIds.slice(i, i + DWH_BATCH_SIZE)
+    const rows = await dwhQuery(
+      `WITH other_tickets AS (
+        SELECT DISTINCT m.reference_number, m.cluster_id
+        FROM support.ticket_cluster_members m
+        WHERE m.cluster_id IN (${batch.map((_, j) => `@c${j}`).join(",")})
+          AND m.reference_number NOT IN (${excludeList})
+      ),
+      ticket_data AS (
+        SELECT ot.cluster_id, ot.reference_number, t.ticket_time_to_closed_sec
+        FROM other_tickets ot
+        LEFT JOIN customer_inquiries.tickets_last_five_years t ON t.reference_number = ot.reference_number
+      ),
+      median_values AS (
+        SELECT DISTINCT cluster_id,
+          PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ticket_time_to_closed_sec) OVER (PARTITION BY cluster_id) AS median_close_seconds
+        FROM ticket_data
+        WHERE ticket_time_to_closed_sec IS NOT NULL
+      )
+      SELECT
+        td.cluster_id,
+        COUNT(DISTINCT td.reference_number) AS other_ticket_count,
+        CAST(MAX(mv.median_close_seconds) / 86400.0 AS decimal(10,2)) AS median_close_days_other
+      FROM ticket_data td
+      LEFT JOIN median_values mv ON mv.cluster_id = td.cluster_id
+      GROUP BY td.cluster_id`,
+      batch.map((id, j) => ({ name: `c${j}`, type: sqlTypes.Int, value: id })),
+    )
+    for (const row of rows) {
+      statsByCluster.set(row.cluster_id, {
+        otherTicketCount: Number(row.other_ticket_count ?? 0),
+        medianCloseDaysOther: row.median_close_days_other != null ? Number(row.median_close_days_other) : null,
+      })
+    }
+  }
+  return statsByCluster
+}
+
+/** Enriches the raw clusterId-keyed groups with display name/hierarchy and "rest of cluster"
+ * stats from the DWH. Tickets with no cluster membership stay grouped under UNKNOWN_GROUP. */
+async function enrichClusterGroups(byClusterRaw, allReferenceNumbers) {
+  const clusterIds = byClusterRaw.map((g) => g.key).filter((k) => k !== UNKNOWN_GROUP).map(Number)
+  const [namesByCluster, otherStatsByCluster] = await Promise.all([
+    fetchClusterNames(clusterIds),
+    fetchOtherClusterStats(clusterIds, allReferenceNumbers),
+  ])
+  return byClusterRaw.map((g) => {
+    if (g.key === UNKNOWN_GROUP) {
+      return { ...g, label: "Ukjent klynge", hierarchyName: null, otherTicketCount: 0, totalTicketCount: g.ticketCount, medianCloseDaysOther: null }
+    }
+    const clusterId = Number(g.key)
+    const names = namesByCluster.get(clusterId)
+    const other = otherStatsByCluster.get(clusterId)
+    return {
+      ...g,
+      label: names?.clusterName ?? `Klynge ${clusterId}`,
+      hierarchyName: names?.hierarchyName ?? null,
+      otherTicketCount: other?.otherTicketCount ?? 0,
+      totalTicketCount: g.ticketCount + (other?.otherTicketCount ?? 0),
+      medianCloseDaysOther: other?.medianCloseDaysOther ?? null,
+    }
+  })
+}
 
 // Matches "**Konfidens** · MEDIUM" (or "HØY"/"LAV", with either "·" or ":" as separator) in the
 // solution agent's final markdown output - confidence isn't a separate logged attribute, it's
@@ -1051,12 +1252,18 @@ app.get("/api/solution-agent/groups", async (req, res) => {
   try {
     const env = resolveEnv(req)
     const tickets = await buildSolutionAgentTickets(env)
+    const byClusterRaw = groupTicketsBy(tickets, "clusterId")
+    const byCluster = await enrichClusterGroups(
+      byClusterRaw,
+      tickets.map((t) => t.reference),
+    )
     res.json({
       totals: { tickets: tickets.length, runs: tickets.reduce((sum, t) => sum + t.runs, 0) },
       lookbackMonths: SOLUTION_LOOKBACK_MONTHS,
       byCategory: groupTicketsBy(tickets, "category"),
       byProduct: groupTicketsBy(tickets, "product"),
       byCompany: groupTicketsBy(tickets, "company"),
+      byCluster,
     })
   } catch (e) {
     console.error("[solution-agent] groups query failed:", e.message)
@@ -1064,17 +1271,37 @@ app.get("/api/solution-agent/groups", async (req, res) => {
   }
 })
 
+// Registered before the generic /:dimension/:value route below so a literal ":value" of
+// "confidence" doesn't get swallowed by that route instead (Express matches by declaration order).
+app.get("/api/solution-agent/groups/:dimension/confidence", async (req, res) => {
+  try {
+    const dimension = req.params.dimension
+    const field = SOLUTION_DIMENSIONS[dimension]
+    if (!field) {
+      return res.status(400).json({ error: "invalid dimension" })
+    }
+    const env = resolveEnv(req)
+    const tickets = await buildSolutionAgentTickets(env)
+    const confidenceByGroup = await computeConfidenceForGroups(env, groupTicketsRaw(tickets, field))
+    res.json(Object.fromEntries(confidenceByGroup))
+  } catch (e) {
+    console.error("[solution-agent] group confidence query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
 app.get("/api/solution-agent/groups/:dimension/:value", async (req, res) => {
   try {
     const dimension = req.params.dimension
-    if (!SOLUTION_DIMENSIONS[dimension]) {
+    const field = SOLUTION_DIMENSIONS[dimension]
+    if (!field) {
       return res.status(400).json({ error: "invalid dimension" })
     }
     const value = decodeURIComponent(req.params.value)
     const env = resolveEnv(req)
 
     const tickets = await buildSolutionAgentTickets(env)
-    const groupTickets = tickets.filter((t) => (t[dimension] || UNKNOWN_GROUP) === value)
+    const groupTickets = tickets.filter((t) => String(t[field] || UNKNOWN_GROUP) === value)
     if (groupTickets.length === 0) {
       return res.json({
         ticketCount: 0,

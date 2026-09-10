@@ -244,13 +244,20 @@ export async function fetchNoAnswerExamples(env: Environment, range: TimeRange):
   return body.examples
 }
 
-export type SolutionGroupDimension = 'category' | 'product' | 'company'
+export type SolutionGroupDimension = 'category' | 'product' | 'company' | 'cluster'
 
 export interface SolutionGroupSummary {
   key: string
+  label: string
   ticketCount: number
   runCount: number
   avgDurationSec: number
+  medianCloseDaysAi: number | null
+  // Only populated for the 'cluster' dimension.
+  hierarchyName?: string | null
+  otherTicketCount?: number
+  totalTicketCount?: number
+  medianCloseDaysOther?: number | null
 }
 
 export interface SolutionAgentGroups {
@@ -259,10 +266,24 @@ export interface SolutionAgentGroups {
   byCategory: SolutionGroupSummary[]
   byProduct: SolutionGroupSummary[]
   byCompany: SolutionGroupSummary[]
+  byCluster: SolutionGroupSummary[]
 }
 
 export async function fetchSolutionAgentGroups(env: Environment): Promise<SolutionAgentGroups> {
   return fetchJson(`/api/solution-agent/groups?env=${env}`)
+}
+
+export interface GroupConfidence {
+  highPercent: number | null
+  mediumPercent: number | null
+  sampledRuns: number
+}
+
+export async function fetchSolutionGroupConfidence(
+  dimension: SolutionGroupDimension,
+  env: Environment,
+): Promise<Record<string, GroupConfidence>> {
+  return fetchJson(`/api/solution-agent/groups/${dimension}/confidence?env=${env}`)
 }
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low' | 'unknown'

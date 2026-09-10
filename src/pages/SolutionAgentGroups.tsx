@@ -7,6 +7,7 @@ import {
   faCubes,
   faLayerGroup,
   faLink,
+  faSitemap,
   faTicket,
 } from '@fortawesome/free-solid-svg-icons'
 import Grid from '@intility/bifrost-react/Grid'
@@ -16,13 +17,16 @@ import Button from '@intility/bifrost-react/Button'
 import Badge from '@intility/bifrost-react/Badge'
 import Message from '@intility/bifrost-react/Message'
 import Modal from '@intility/bifrost-react/Modal'
+import Table from '@intility/bifrost-react/Table'
 import {
   DEFAULT_ENVIRONMENT,
   ENVIRONMENTS,
   fetchSolutionAgentGroups,
+  fetchSolutionGroupConfidence,
   fetchSolutionGroupDetail,
   type ConfidenceLevel,
   type Environment,
+  type GroupConfidence,
   type SolutionAgentGroups,
   type SolutionGroupDetail,
   type SolutionGroupDimension,
@@ -44,7 +48,90 @@ const DIMENSION_TABS: { key: SolutionGroupDimension; label: string; icon: typeof
   { key: 'category', label: 'Category', icon: faLayerGroup },
   { key: 'product', label: 'Product', icon: faCubes },
   { key: 'company', label: 'Company', icon: faBuilding },
+  { key: 'cluster', label: 'Ticket clusters', icon: faSitemap },
 ]
+
+function formatDays(days: number | null | undefined): string {
+  if (days == null) return '–'
+  return `${days.toFixed(1)} d`
+}
+
+function formatPercent(percent: number | null | undefined): string {
+  if (percent == null) return '–'
+  return `${percent.toFixed(0)}%`
+}
+
+function GroupsTable({
+  items,
+  dimension,
+  confidence,
+  confidenceLoading,
+  onSelect,
+}: {
+  items: SolutionGroupSummary[]
+  dimension: SolutionGroupDimension
+  confidence: Record<string, GroupConfidence>
+  confidenceLoading: boolean
+  onSelect: (item: SolutionGroupSummary) => void
+}) {
+  const isCluster = dimension === 'cluster'
+  const rightAlign = { textAlign: 'right' } as const
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <Table style={{ width: '100%' }}>
+        <Table.Header>
+          <Table.Row>
+            <Table.HeaderCell>Navn</Table.HeaderCell>
+            {isCluster && <Table.HeaderCell>Hierarki</Table.HeaderCell>}
+            <Table.HeaderCell style={rightAlign}>{isCluster ? 'AI-saker' : 'Saker'}</Table.HeaderCell>
+            {isCluster && <Table.HeaderCell style={rightAlign}>Andre saker i klynge</Table.HeaderCell>}
+            {isCluster && <Table.HeaderCell style={rightAlign}>Totalt i klynge</Table.HeaderCell>}
+            <Table.HeaderCell style={rightAlign}>Kjøringer</Table.HeaderCell>
+            <Table.HeaderCell style={rightAlign}>Snitt varighet</Table.HeaderCell>
+            <Table.HeaderCell style={rightAlign}>Høy konfidens</Table.HeaderCell>
+            <Table.HeaderCell style={rightAlign}>Medium konfidens</Table.HeaderCell>
+            <Table.HeaderCell style={rightAlign}>Median løsningstid (AI)</Table.HeaderCell>
+            {isCluster && <Table.HeaderCell style={rightAlign}>Median løsningstid (andre)</Table.HeaderCell>}
+          </Table.Row>
+        </Table.Header>
+        <Table.Body>
+          {items.map((item) => {
+            const c = confidence[item.key]
+            return (
+              <Table.Row key={item.key} onClick={() => onSelect(item)}>
+                <Table.Cell>{item.label}</Table.Cell>
+                {isCluster && (
+                  <Table.Cell>
+                    <small className="bfc-base-2">{item.hierarchyName ?? '–'}</small>
+                  </Table.Cell>
+                )}
+                <Table.Cell style={rightAlign}>{compactFormatter.format(item.ticketCount)}</Table.Cell>
+                {isCluster && (
+                  <Table.Cell style={rightAlign}>{compactFormatter.format(item.otherTicketCount ?? 0)}</Table.Cell>
+                )}
+                {isCluster && (
+                  <Table.Cell style={rightAlign}>
+                    {compactFormatter.format(item.totalTicketCount ?? item.ticketCount)}
+                  </Table.Cell>
+                )}
+                <Table.Cell style={rightAlign}>{compactFormatter.format(item.runCount)}</Table.Cell>
+                <Table.Cell style={rightAlign}>{formatDuration(item.avgDurationSec)}</Table.Cell>
+                <Table.Cell style={rightAlign}>
+                  {confidenceLoading && !c ? '…' : formatPercent(c?.highPercent)}
+                </Table.Cell>
+                <Table.Cell style={rightAlign}>
+                  {confidenceLoading && !c ? '…' : formatPercent(c?.mediumPercent)}
+                </Table.Cell>
+                <Table.Cell style={rightAlign}>{formatDays(item.medianCloseDaysAi)}</Table.Cell>
+                {isCluster && <Table.Cell style={rightAlign}>{formatDays(item.medianCloseDaysOther)}</Table.Cell>}
+              </Table.Row>
+            )
+          })}
+        </Table.Body>
+      </Table>
+    </div>
+  )
+}
 
 const CONFIDENCE_META: Record<ConfidenceLevel, { label: string; color: string }> = {
   high: { label: 'Høy', color: 'var(--bfc-success)' },
@@ -56,12 +143,14 @@ const CONFIDENCE_META: Record<ConfidenceLevel, { label: string; color: string }>
 function groupsForDimension(groups: SolutionAgentGroups, dimension: SolutionGroupDimension): SolutionGroupSummary[] {
   if (dimension === 'category') return groups.byCategory
   if (dimension === 'product') return groups.byProduct
-  return groups.byCompany
+  if (dimension === 'company') return groups.byCompany
+  return groups.byCluster
 }
 
 interface DetailModalState {
   dimension: SolutionGroupDimension
   value: string
+  label: string
   detail: SolutionGroupDetail | null
   loading: boolean
   error: string | null
@@ -108,7 +197,7 @@ function GroupDetailModal({
   const dailyUsageData = detail ? pivotDaily(detail.dailyUsage, () => 'count') : []
 
   return (
-    <Modal isOpen={state != null} onRequestClose={onClose} header={state?.value} width={900}>
+    <Modal isOpen={state != null} onRequestClose={onClose} header={state?.label} width={900}>
       {state?.loading && (
         <Inline align="center" gap={8}>
           <Icon.Spinner size={20} />
@@ -197,10 +286,15 @@ function SolutionAgentGroupsPage() {
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<SolutionGroupDimension>('category')
   const [detailModal, setDetailModal] = useState<DetailModalState | null>(null)
+  const [confidenceByDimension, setConfidenceByDimension] = useState<
+    Partial<Record<SolutionGroupDimension, Record<string, GroupConfidence>>>
+  >({})
+  const [confidenceLoadingDimension, setConfidenceLoadingDimension] = useState<SolutionGroupDimension | null>(null)
 
   const load = useCallback(() => {
     setLoading(true)
     setError(null)
+    setConfidenceByDimension({})
     fetchSolutionAgentGroups(environment)
       .then((data) => setGroups(data))
       .catch((e: Error) => setError(e.message))
@@ -211,12 +305,23 @@ function SolutionAgentGroupsPage() {
     load()
   }, [load])
 
+  useEffect(() => {
+    if (!groups || confidenceByDimension[tab]) return
+    setConfidenceLoadingDimension(tab)
+    fetchSolutionGroupConfidence(tab, environment)
+      .then((data) => setConfidenceByDimension((prev) => ({ ...prev, [tab]: data })))
+      .catch(() => {})
+      .finally(() => setConfidenceLoadingDimension((current) => (current === tab ? null : current)))
+  }, [groups, tab, environment, confidenceByDimension])
+
   const openDetail = useCallback(
-    (dimension: SolutionGroupDimension, value: string) => {
-      setDetailModal({ dimension, value, detail: null, loading: true, error: null })
+    (dimension: SolutionGroupDimension, value: string, label: string) => {
+      setDetailModal({ dimension, value, label, detail: null, loading: true, error: null })
       fetchSolutionGroupDetail(dimension, value, environment)
-        .then((detail) => setDetailModal({ dimension, value, detail, loading: false, error: null }))
-        .catch((e: Error) => setDetailModal({ dimension, value, detail: null, loading: false, error: e.message }))
+        .then((detail) => setDetailModal({ dimension, value, label, detail, loading: false, error: null }))
+        .catch((e: Error) =>
+          setDetailModal({ dimension, value, label, detail: null, loading: false, error: e.message }),
+        )
     },
     [environment],
   )
@@ -228,7 +333,9 @@ function SolutionAgentGroupsPage() {
       <Inline align="center" gap={12} style={{ marginBottom: 24, flexWrap: 'wrap' }}>
         <Inline.Stretch>
           <h1>Solution Agent</h1>
-          <p className="bfc-base-2">Saker fordelt på kategori, produkt og selskap — totalt for alle Logfire-kjøringer</p>
+          <p className="bfc-base-2">
+            Saker fordelt på kategori, produkt, selskap og ticket cluster — totalt for alle Logfire-kjøringer
+          </p>
         </Inline.Stretch>
         <Button.Group>
           {ENVIRONMENTS.map((env) => (
@@ -276,9 +383,12 @@ function SolutionAgentGroupsPage() {
             {activeItems.length === 0 ? (
               <Message state="neutral" noIcon>Ingen saker registrert.</Message>
             ) : (
-              <BreakdownBars
-                items={activeItems.map((g) => ({ label: g.key, count: g.ticketCount }))}
-                onSelect={(value) => openDetail(tab, value)}
+              <GroupsTable
+                items={activeItems}
+                dimension={tab}
+                confidence={confidenceByDimension[tab] ?? {}}
+                confidenceLoading={confidenceLoadingDimension === tab}
+                onSelect={(item) => openDetail(tab, item.key, item.label)}
               />
             )}
           </SectionBox>
