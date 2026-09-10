@@ -1290,14 +1290,18 @@ app.get("/api/solution-agent/groups/:dimension/confidence", async (req, res) => 
   }
 })
 
-app.get("/api/solution-agent/groups/:dimension/:value", async (req, res) => {
+// "value" is a query param, not a path segment, because group keys (e.g. a category name like
+// "Intility Support/Team Identity & Cloud App") can contain slashes - encoded into a path segment
+// as %2F, some proxies normalize that back to a literal "/" before it reaches Express, splitting
+// it into extra path segments that miss this route entirely (falling through to the SPA's HTML).
+app.get("/api/solution-agent/groups/:dimension/detail", async (req, res) => {
   try {
     const dimension = req.params.dimension
     const field = SOLUTION_DIMENSIONS[dimension]
     if (!field) {
       return res.status(400).json({ error: "invalid dimension" })
     }
-    const value = decodeURIComponent(req.params.value)
+    const value = String(req.query.value ?? "")
     const env = resolveEnv(req)
 
     const tickets = await buildSolutionAgentTickets(env)

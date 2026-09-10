@@ -304,5 +304,5 @@ export async function fetchSolutionGroupDetail(
   value: string,
   env: Environment,
 ): Promise<SolutionGroupDetail> {
-  return fetchJson(`/api/solution-agent/groups/${dimension}/${encodeURIComponent(value)}?env=${env}`)
+  return fetchJson(`/api/solution-agent/groups/${dimension}/detail?value=${encodeURIComponent(value)}&env=${env}`)
 }
