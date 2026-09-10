@@ -243,3 +243,45 @@ export async function fetchNoAnswerExamples(env: Environment, range: TimeRange):
   )
   return body.examples
 }
+
+export type SolutionGroupDimension = 'category' | 'product' | 'company'
+
+export interface SolutionGroupSummary {
+  key: string
+  ticketCount: number
+  runCount: number
+  avgDurationSec: number
+}
+
+export interface SolutionAgentGroups {
+  totals: { tickets: number; runs: number }
+  lookbackMonths: number
+  byCategory: SolutionGroupSummary[]
+  byProduct: SolutionGroupSummary[]
+  byCompany: SolutionGroupSummary[]
+}
+
+export async function fetchSolutionAgentGroups(env: Environment): Promise<SolutionAgentGroups> {
+  return fetchJson(`/api/solution-agent/groups?env=${env}`)
+}
+
+export type ConfidenceLevel = 'high' | 'medium' | 'low' | 'unknown'
+
+export interface SolutionGroupDetail {
+  ticketCount: number
+  runCount: number
+  avgDurationSec: number
+  sampledRuns: number
+  dailyUsage: { day: string; count: number }[]
+  confidence: { level: ConfidenceLevel; count: number }[]
+  sources: { title: string; url: string; count: number }[]
+  tools: { tool: string; count: number }[]
+}
+
+export async function fetchSolutionGroupDetail(
+  dimension: SolutionGroupDimension,
+  value: string,
+  env: Environment,
+): Promise<SolutionGroupDetail> {
+  return fetchJson(`/api/solution-agent/groups/${dimension}/${encodeURIComponent(value)}?env=${env}`)
+}

@@ -184,6 +184,157 @@ async function fetchTraceContext(traceIds, range) {
   return { modelByTrace, ticketByTrace }
 }
 
+const UNKNOWN_GROUP = "Ukjent"
+// Per-query Logfire responses are capped at 1000 rows (see logfire.mjs), and a full-history
+// GROUP BY reference_number can easily exceed that once the solution agent has run for a while.
+// Splitting the lookback into monthly windows keeps each window's distinct-ticket count (and
+// thus its row count) well under the cap; totals are then summed across windows in JS.
+const SOLUTION_LOOKBACK_MONTHS = 24
+// Confidence/sources/tools require full step detail (one query per trace), which is bounded by
+// the same 1000-row cap on total spans - so those breakdowns are computed from only the most
+// recent runs in a group, not the group's full history (mirrors the existing `detailedTickets`
+// cap used for the main dashboard's per-ticket solution view).
+const SOLUTION_SAMPLE_RUN_LIMIT = 50
+
+function monthlyLookbackRanges(months) {
+  const ranges = []
+  const now = new Date()
+  for (let i = 0; i < months; i++) {
+    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i + 1, 1))
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1))
+    ranges.push({ minTimestamp: start.toISOString(), maxTimestamp: end.toISOString() })
+  }
+  return ranges
+}
+
+const SOLUTION_ALL_TIME_RANGE = {
+  minTimestamp: monthlyLookbackRanges(SOLUTION_LOOKBACK_MONTHS).at(-1).minTimestamp,
+  maxTimestamp: new Date().toISOString(),
+}
+
+/** Sums solution_agent_finished runs per ticket (reference_number) across the whole lookback
+ * window, chunked by month to stay under Logfire's per-query row cap. */
+async function fetchAllSolutionRunsByTicket(env) {
+  const ranges = monthlyLookbackRanges(SOLUTION_LOOKBACK_MONTHS)
+  const monthlyResults = await Promise.all(
+    ranges.map((range) =>
+      logfireQuery(
+        `SELECT attributes->>'reference_number' as ticket, count(*) as runs, sum(COALESCE(CAST(attributes->>'duration_s' AS DOUBLE), 0)) as duration_sum, max(start_timestamp) as last_seen FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IS NOT NULL GROUP BY 1`,
+        range,
+      ),
+    ),
+  )
+  const byTicket = new Map()
+  for (const result of monthlyResults) {
+    for (const row of result.data) {
+      if (!row.ticket) continue
+      const existing = byTicket.get(row.ticket) ?? { runs: 0, durationSum: 0, lastSeen: null }
+      existing.runs += Number(row.runs ?? 0)
+      existing.durationSum += Number(row.duration_sum ?? 0)
+      if (!existing.lastSeen || row.last_seen > existing.lastSeen) existing.lastSeen = row.last_seen
+      byTicket.set(row.ticket, existing)
+    }
+  }
+  return byTicket
+}
+
+const DWH_BATCH_SIZE = 500
+
+/** Looks up category/product/company for a batch of reference numbers, chunked to stay well
+ * under SQL Server's ~2100 parameter limit per query. */
+async function fetchTicketMetaByReference(referenceNumbers) {
+  const metaByRef = new Map()
+  for (let i = 0; i < referenceNumbers.length; i += DWH_BATCH_SIZE) {
+    const batch = referenceNumbers.slice(i, i + DWH_BATCH_SIZE)
+    const rows = await dwhQuery(
+      `SELECT reference_number, category_name, category_fullname, implementation_name, company_name FROM customer_inquiries.tickets_last_five_years WHERE reference_number IN (${batch.map((_, j) => `@ref${j}`).join(",")})`,
+      batch.map((ref, j) => ({ name: `ref${j}`, type: sqlTypes.NVarChar, value: ref })),
+    )
+    for (const row of rows) {
+      metaByRef.set(row.reference_number, {
+        categoryName: row.category_name ?? null,
+        categoryFullName: row.category_fullname ?? null,
+        implementationName: row.implementation_name ?? null,
+        companyName: row.company_name ?? null,
+      })
+    }
+  }
+  return metaByRef
+}
+
+/** One row per ticket the solution agent has ever run against, with its DWH category/product/
+ * company (falling back to "Ukjent" when the ticket isn't found in the DWH extract). */
+async function buildSolutionAgentTickets(env) {
+  const byTicket = await fetchAllSolutionRunsByTicket(env)
+  const referenceNumbers = [...byTicket.keys()]
+  const metaByRef = await fetchTicketMetaByReference(referenceNumbers)
+
+  return referenceNumbers.map((ref) => {
+    const stats = byTicket.get(ref)
+    const meta = metaByRef.get(ref)
+    return {
+      reference: ref,
+      runs: stats.runs,
+      avgDurationSec: stats.runs > 0 ? stats.durationSum / stats.runs : 0,
+      lastSeen: stats.lastSeen,
+      category: meta?.categoryFullName ?? meta?.categoryName ?? UNKNOWN_GROUP,
+      product: meta?.implementationName ?? UNKNOWN_GROUP,
+      company: meta?.companyName ?? UNKNOWN_GROUP,
+    }
+  })
+}
+
+function groupTicketsBy(tickets, key) {
+  const groups = new Map()
+  for (const t of tickets) {
+    const k = t[key] || UNKNOWN_GROUP
+    if (!groups.has(k)) groups.set(k, { key: k, ticketCount: 0, runCount: 0, durationSum: 0 })
+    const g = groups.get(k)
+    g.ticketCount += 1
+    g.runCount += t.runs
+    g.durationSum += t.avgDurationSec * t.runs
+  }
+  return [...groups.values()]
+    .map((g) => ({
+      key: g.key,
+      ticketCount: g.ticketCount,
+      runCount: g.runCount,
+      avgDurationSec: g.runCount > 0 ? g.durationSum / g.runCount : 0,
+    }))
+    .sort((a, b) => b.ticketCount - a.ticketCount)
+}
+
+const SOLUTION_DIMENSIONS = { category: "category", product: "product", company: "company" }
+
+// Matches "**Konfidens** · MEDIUM" (or "HØY"/"LAV", with either "·" or ":" as separator) in the
+// solution agent's final markdown output - confidence isn't a separate logged attribute, it's
+// embedded in this free-text field, so it has to be parsed out rather than queried directly.
+const CONFIDENCE_RE = /\*\*Konfidens\*\*\s*[·:-]\s*(HØY|MEDIUM|LAV)/i
+const CONFIDENCE_LABELS = { "høy": "high", medium: "medium", lav: "low" }
+
+function parseConfidence(solutionText) {
+  if (!solutionText) return null
+  const m = solutionText.match(CONFIDENCE_RE)
+  if (!m) return null
+  return CONFIDENCE_LABELS[m[1].toLowerCase()] ?? null
+}
+
+// Sources are listed under a trailing "## Kilder" section as "[1] [Title](url) — ..." lines,
+// and referenced inline in the steps above as "[[1]](url)" - same free-text-only situation as
+// confidence, so they're parsed out of the solution markdown rather than queried directly.
+function parseSources(solutionText) {
+  if (!solutionText) return []
+  const section = solutionText.match(/##\s*Kilder\s*\n([\s\S]*)/i)
+  if (!section) return []
+  const sources = []
+  const lineRe = /\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\)/g
+  let m
+  while ((m = lineRe.exec(section[1]))) {
+    sources.push({ title: m[1], url: m[2] })
+  }
+  return sources
+}
+
 /** Groups ungrouped solution_agent_finished rows into one entry per ticket, newest run first. */
 function groupRunsByTicket(runRows) {
   const byTicket = new Map()
@@ -892,6 +1043,115 @@ app.get("/api/day-log", async (req, res) => {
     })
   } catch (e) {
     console.error("[logfire] day log query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/solution-agent/groups", async (req, res) => {
+  try {
+    const env = resolveEnv(req)
+    const tickets = await buildSolutionAgentTickets(env)
+    res.json({
+      totals: { tickets: tickets.length, runs: tickets.reduce((sum, t) => sum + t.runs, 0) },
+      lookbackMonths: SOLUTION_LOOKBACK_MONTHS,
+      byCategory: groupTicketsBy(tickets, "category"),
+      byProduct: groupTicketsBy(tickets, "product"),
+      byCompany: groupTicketsBy(tickets, "company"),
+    })
+  } catch (e) {
+    console.error("[solution-agent] groups query failed:", e.message)
+    res.status(e.status ?? 502).json({ error: e.message })
+  }
+})
+
+app.get("/api/solution-agent/groups/:dimension/:value", async (req, res) => {
+  try {
+    const dimension = req.params.dimension
+    if (!SOLUTION_DIMENSIONS[dimension]) {
+      return res.status(400).json({ error: "invalid dimension" })
+    }
+    const value = decodeURIComponent(req.params.value)
+    const env = resolveEnv(req)
+
+    const tickets = await buildSolutionAgentTickets(env)
+    const groupTickets = tickets.filter((t) => (t[dimension] || UNKNOWN_GROUP) === value)
+    if (groupTickets.length === 0) {
+      return res.json({
+        ticketCount: 0,
+        runCount: 0,
+        avgDurationSec: 0,
+        sampledRuns: 0,
+        dailyUsage: [],
+        confidence: [],
+        sources: [],
+        tools: [],
+      })
+    }
+
+    const refs = groupTickets.map((t) => t.reference)
+    const runCount = groupTickets.reduce((sum, t) => sum + t.runs, 0)
+    const avgDurationSec =
+      runCount > 0 ? groupTickets.reduce((sum, t) => sum + t.avgDurationSec * t.runs, 0) / runCount : 0
+
+    const [dailyUsageResult, sampleResult] = await Promise.all([
+      logfireQuery(
+        `SELECT date_trunc('day', start_timestamp) as day, count(*) as n FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) GROUP BY 1 ORDER BY 1`,
+        SOLUTION_ALL_TIME_RANGE,
+      ),
+      logfireQuery(
+        `SELECT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) ORDER BY start_timestamp DESC LIMIT ${SOLUTION_SAMPLE_RUN_LIMIT}`,
+        SOLUTION_ALL_TIME_RANGE,
+      ),
+    ])
+
+    const sampleTraceIds = sampleResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
+    const { stepsByTrace } = await fetchStepsByTrace(sampleTraceIds, SOLUTION_ALL_TIME_RANGE)
+
+    const confidenceCounts = { high: 0, medium: 0, low: 0, unknown: 0 }
+    const sourceCounts = new Map()
+    const toolCounts = new Map()
+
+    for (const traceId of sampleTraceIds) {
+      const steps = stepsByTrace.get(traceId) ?? []
+      const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
+      const solution = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1].output : null
+
+      const confidence = parseConfidence(solution)
+      confidenceCounts[confidence ?? "unknown"] += 1
+
+      for (const source of parseSources(solution)) {
+        const key = source.url || source.title
+        const existing = sourceCounts.get(key) ?? { title: source.title, url: source.url, count: 0 }
+        existing.count += 1
+        sourceCounts.set(key, existing)
+      }
+
+      for (const step of steps) {
+        if (step.type !== "tool") continue
+        toolCounts.set(step.label, (toolCounts.get(step.label) ?? 0) + 1)
+      }
+    }
+
+    res.json({
+      ticketCount: groupTickets.length,
+      runCount,
+      avgDurationSec,
+      sampledRuns: sampleTraceIds.length,
+      dailyUsage: dailyUsageResult.data.map((row) => ({ day: row.day, count: Number(row.n ?? 0) })),
+      confidence: [
+        { level: "high", count: confidenceCounts.high },
+        { level: "medium", count: confidenceCounts.medium },
+        { level: "low", count: confidenceCounts.low },
+        { level: "unknown", count: confidenceCounts.unknown },
+      ],
+      sources: [...sourceCounts.values()].sort((a, b) => b.count - a.count).slice(0, 10),
+      tools: [...toolCounts.entries()]
+        .map(([tool, count]) => ({ tool, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10),
+    })
+  } catch (e) {
+    console.error("[solution-agent] group detail query failed:", e.message)
     res.status(e.status ?? 502).json({ error: e.message })
   }
 })
