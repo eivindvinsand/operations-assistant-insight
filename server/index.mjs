@@ -270,7 +270,7 @@ async function fetchClusterIdByReference(referenceNumbers) {
   for (let i = 0; i < referenceNumbers.length; i += DWH_BATCH_SIZE) {
     const batch = referenceNumbers.slice(i, i + DWH_BATCH_SIZE)
     const rows = await dwhQuery(
-      `SELECT reference_number, cluster_id FROM support.ticket_cluster_members WHERE reference_number IN (${batch.map((_, j) => `@ref${j}`).join(",")})`,
+      `SELECT reference_number, cluster_id FROM support.ticket_cluster_members WHERE reference_number COLLATE DATABASE_DEFAULT IN (${batch.map((_, j) => `@ref${j}`).join(",")})`,
       batch.map((ref, j) => ({ name: `ref${j}`, type: sqlTypes.NVarChar, value: ref })),
     )
     for (const row of rows) clusterByRef.set(row.reference_number, row.cluster_id)
@@ -449,12 +449,12 @@ async function fetchOtherClusterStats(clusterIds, aiReferenceNumbers) {
         SELECT DISTINCT m.reference_number, m.cluster_id
         FROM support.ticket_cluster_members m
         WHERE m.cluster_id IN (${batch.map((_, j) => `@c${j}`).join(",")})
-          AND m.reference_number NOT IN (${excludeList})
+          AND m.reference_number COLLATE DATABASE_DEFAULT NOT IN (${excludeList})
       ),
       ticket_data AS (
         SELECT ot.cluster_id, ot.reference_number, t.ticket_time_to_closed_sec
         FROM other_tickets ot
-        LEFT JOIN customer_inquiries.tickets_last_five_years t ON t.reference_number = ot.reference_number
+        LEFT JOIN customer_inquiries.tickets_last_five_years t ON t.reference_number = ot.reference_number COLLATE DATABASE_DEFAULT
       ),
       median_values AS (
         SELECT DISTINCT cluster_id,
