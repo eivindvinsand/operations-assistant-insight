@@ -1475,7 +1475,6 @@ function Dashboard() {
               <Input
                 label="Search conversation log"
                 hideLabel
-                small
                 clearable
                 icon={faMagnifyingGlass}
                 placeholder="Search by reference or model…"
