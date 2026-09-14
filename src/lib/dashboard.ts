@@ -288,6 +288,8 @@ export async function fetchSolutionGroupConfidence(
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low' | 'unknown'
 
+export type SourceType = 'ticket' | 'article' | 'cmdb' | 'msdocs' | 'other'
+
 export interface SolutionGroupDetail {
   ticketCount: number
   runCount: number
@@ -296,6 +298,7 @@ export interface SolutionGroupDetail {
   dailyUsage: { day: string; count: number }[]
   confidence: { level: ConfidenceLevel; count: number }[]
   sources: { title: string; url: string; count: number }[]
+  sourceTypes: { type: SourceType; count: number }[]
   tools: { tool: string; count: number }[]
 }
 

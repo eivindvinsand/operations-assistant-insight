@@ -520,20 +520,48 @@ function parseConfidence(solutionText) {
   return CONFIDENCE_LABELS[m[1].toLowerCase()] ?? null
 }
 
-// Sources are listed under a trailing "## Kilder" section as "[1] [Title](url) — ..." lines,
-// and referenced inline in the steps above as "[[1]](url)" - same free-text-only situation as
-// confidence, so they're parsed out of the solution markdown rather than queried directly.
+// Sources are listed under a trailing "## Kilder" section, one per line as either a markdown
+// link ("[1] [Title](url)") or, in practice, a plain description followed by a trailing
+// "(url: https://...)"/"(URL: https://...)" - same free-text-only situation as confidence, so
+// they're parsed out of the solution markdown rather than queried directly.
 function parseSources(solutionText) {
   if (!solutionText) return []
   const section = solutionText.match(/##\s*Kilder\s*\n([\s\S]*)/i)
   if (!section) return []
   const sources = []
-  const lineRe = /\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\)/g
-  let m
-  while ((m = lineRe.exec(section[1]))) {
-    sources.push({ title: m[1], url: m[2] })
+  for (const line of section[1].split(/\n+/)) {
+    const md = line.match(/^\s*\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\)/)
+    if (md) {
+      sources.push({ title: md[1].trim(), url: md[2].trim() })
+      continue
+    }
+    const plain = line.match(/^\s*\[\d+\]\s*(.*?)\s*\(url:\s*([^)]+)\)\s*$/i)
+    if (plain) {
+      sources.push({ title: plain[1].trim(), url: plain[2].trim() })
+    }
   }
   return sources
+}
+
+// Classifies a source URL into a coarse type, based on the internal Intility domains observed
+// in solution agent output (ticket references, published KB articles, CMDB entries, Microsoft
+// Learn docs). Anything else falls back to "other".
+const SOURCE_TYPE_HOSTS = [
+  { match: (host) => host === "internal-operations.intility.com", type: "ticket" },
+  { match: (host) => host === "publish.intility.com", type: "article" },
+  { match: (host) => host === "internal-apm.intility.com", type: "cmdb" },
+  { match: (host) => host === "learn.microsoft.com" || host.endsWith(".microsoft.com"), type: "msdocs" },
+]
+
+function classifySourceType(url) {
+  if (!url) return "other"
+  let host
+  try {
+    host = new URL(url).hostname.toLowerCase()
+  } catch {
+    return "other"
+  }
+  return SOURCE_TYPE_HOSTS.find((rule) => rule.match(host))?.type ?? "other"
 }
 
 /** Groups ungrouped solution_agent_finished rows into one entry per ticket, newest run first. */
@@ -1315,6 +1343,7 @@ app.get("/api/solution-agent/groups/:dimension/detail", async (req, res) => {
         dailyUsage: [],
         confidence: [],
         sources: [],
+        sourceTypes: [],
         tools: [],
       })
     }
@@ -1340,6 +1369,7 @@ app.get("/api/solution-agent/groups/:dimension/detail", async (req, res) => {
 
     const confidenceCounts = { high: 0, medium: 0, low: 0, unknown: 0 }
     const sourceCounts = new Map()
+    const sourceTypeCounts = new Map()
     const toolCounts = new Map()
 
     for (const traceId of sampleTraceIds) {
@@ -1355,6 +1385,9 @@ app.get("/api/solution-agent/groups/:dimension/detail", async (req, res) => {
         const existing = sourceCounts.get(key) ?? { title: source.title, url: source.url, count: 0 }
         existing.count += 1
         sourceCounts.set(key, existing)
+
+        const type = classifySourceType(source.url)
+        sourceTypeCounts.set(type, (sourceTypeCounts.get(type) ?? 0) + 1)
       }
 
       for (const step of steps) {
@@ -1376,6 +1409,9 @@ app.get("/api/solution-agent/groups/:dimension/detail", async (req, res) => {
         { level: "unknown", count: confidenceCounts.unknown },
       ],
       sources: [...sourceCounts.values()].sort((a, b) => b.count - a.count).slice(0, 10),
+      sourceTypes: [...sourceTypeCounts.entries()]
+        .map(([type, count]) => ({ type, count }))
+        .sort((a, b) => b.count - a.count),
       tools: [...toolCounts.entries()]
         .map(([tool, count]) => ({ tool, count }))
         .sort((a, b) => b.count - a.count)

@@ -31,6 +31,7 @@ import {
   type SolutionGroupDetail,
   type SolutionGroupDimension,
   type SolutionGroupSummary,
+  type SourceType,
 } from '../lib/dashboard'
 import {
   BreakdownBars,
@@ -140,6 +141,14 @@ const CONFIDENCE_META: Record<ConfidenceLevel, { label: string; color: string }>
   unknown: { label: 'Ukjent', color: 'var(--bfc-base-c-dimmed)' },
 }
 
+const SOURCE_TYPE_META: Record<SourceType, { label: string; color: string }> = {
+  ticket: { label: 'Ticket', color: 'var(--bfc-chill)' },
+  article: { label: 'Artikkel', color: 'var(--bfc-attn)' },
+  cmdb: { label: 'CMDB', color: 'var(--bfc-warning)' },
+  msdocs: { label: 'Microsoft Docs', color: 'var(--bfc-brand)' },
+  other: { label: 'Annet', color: 'var(--bfc-base-c-2)' },
+}
+
 function groupsForDimension(groups: SolutionAgentGroups, dimension: SolutionGroupDimension): SolutionGroupSummary[] {
   if (dimension === 'category') return groups.byCategory
   if (dimension === 'product') return groups.byProduct
@@ -186,6 +195,36 @@ function ConfidenceBars({ confidence }: { confidence: SolutionGroupDetail['confi
   )
 }
 
+function SourceTypeBars({ sourceTypes }: { sourceTypes: SolutionGroupDetail['sourceTypes'] }) {
+  const total = sourceTypes.reduce((sum, s) => sum + s.count, 0)
+  if (total === 0) return <Message state="neutral" noIcon>Ingen kilder funnet.</Message>
+  return (
+    <Grid gap={8}>
+      {sourceTypes
+        .filter((s) => s.count > 0)
+        .map((s) => {
+          const meta = SOURCE_TYPE_META[s.type]
+          const percent = (s.count / total) * 100
+          return (
+            <Inline key={s.type} align="center" gap={12}>
+              <Inline.Stretch>
+                <small className="bfc-base-2" style={{ display: 'block', marginBottom: 2 }}>
+                  {meta.label}
+                </small>
+                <div style={{ height: 6, background: 'var(--bfc-base-3)', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${percent}%`, background: meta.color }} />
+                </div>
+              </Inline.Stretch>
+              <small className="bfc-base-2">
+                {s.count} ({percent.toFixed(0)}%)
+              </small>
+            </Inline>
+          )
+        })}
+    </Grid>
+  )
+}
+
 function GroupDetailModal({
   state,
   onClose,
@@ -222,6 +261,13 @@ function GroupDetailModal({
               <ConfidenceBars confidence={detail.confidence} />
               <small className="bfc-base-2" style={{ display: 'block', marginTop: 12 }}>
                 Basert på de {detail.sampledRuns} nyeste kjøringene i gruppen.
+              </small>
+            </SectionBox>
+
+            <SectionBox title="Kildetyper">
+              <SourceTypeBars sourceTypes={detail.sourceTypes} />
+              <small className="bfc-base-2" style={{ display: 'block', marginTop: 12 }}>
+                Andel av alle siterte kilder, basert på de {detail.sampledRuns} nyeste kjøringene i gruppen.
               </small>
             </SectionBox>
 
