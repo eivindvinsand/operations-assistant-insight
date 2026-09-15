@@ -20,6 +20,13 @@ app.use("/api", (_req, res, next) => {
 const DEFAULT_RANGE_HOURS = 24
 const TRACE_ID_RE = /^[0-9a-f]{32}$/i
 
+/** What actually distinguishes one conversation from another for grouping purposes. A ticket
+ * (or other business object) context always wins. Failing that, `chat_id` ties together every
+ * turn of a context-less chat — except the very first turn, which the client sends before it
+ * knows the chat's id yet (chat_id is null there), so that lone first message falls back to its
+ * own trace_id instead of collapsing into one giant "no context" bucket with every other chat. */
+const GROUP_KEY_SQL = `COALESCE(NULLIF(attributes->'context'->>'entity_id', '0'), attributes->>'chat_id', trace_id)`
+
 const ALLOWED_ENVIRONMENTS = new Set(["dev", "local", "prod", "test"])
 const DEFAULT_ENVIRONMENT = "prod"
 
@@ -667,23 +674,24 @@ app.get("/api/dashboard", async (req, res) => {
         range,
       ),
       logfireQuery(
-        `SELECT entity_type, entity_id, trace_id, n, last_seen, model, reasoning_effort FROM (
+        `SELECT entity_type, entity_id, group_key, trace_id, n, last_seen, model, reasoning_effort FROM (
           SELECT
             COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
             attributes->'context'->>'entity_id' as entity_id,
+            ${GROUP_KEY_SQL} as group_key,
             trace_id,
             attributes->>'model' as model,
             attributes->>'reasoning_effort' as reasoning_effort,
             start_timestamp,
-            COUNT(*) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id') as n,
-            MAX(start_timestamp) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id') as last_seen,
-            ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), attributes->'context'->>'entity_id' ORDER BY start_timestamp DESC) as rn
+            COUNT(*) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), ${GROUP_KEY_SQL}) as n,
+            MAX(start_timestamp) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), ${GROUP_KEY_SQL}) as last_seen,
+            ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), ${GROUP_KEY_SQL} ORDER BY start_timestamp DESC) as rn
           FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
         ) WHERE rn = 1 ORDER BY last_seen DESC LIMIT 1000`,
         range,
       ),
       logfireQuery(
-        `SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, attributes->'context'->>'entity_id' as entity_id, count(distinct trace_id) as error_requests
+        `SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, ${GROUP_KEY_SQL} as group_key, count(distinct trace_id) as error_requests
         FROM records
         WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
         AND trace_id IN (SELECT DISTINCT trace_id FROM records WHERE level >= 17 AND deployment_environment = '${env}')
@@ -745,13 +753,13 @@ app.get("/api/dashboard", async (req, res) => {
       // fraction. Ordered and capped the same way as usageResult so the two line up on the same
       // set of entities.
       logfireQuery(
-        `SELECT entity_type, entity_id,
+        `SELECT entity_type, group_key,
           count(DISTINCT cr.trace_id) as total,
           count(DISTINCT CASE WHEN a.trace_id IS NULL THEN cr.trace_id END) as failed,
           max(cr.start_timestamp) as last_seen
         FROM (
           SELECT trace_id, COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
-            attributes->'context'->>'entity_id' as entity_id, start_timestamp
+            ${GROUP_KEY_SQL} as group_key, start_timestamp
           FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
         ) cr
         LEFT JOIN (${answeredTracesSql(env)}) a ON a.trace_id = cr.trace_id
@@ -786,11 +794,10 @@ app.get("/api/dashboard", async (req, res) => {
       ),
     ])
 
-    // Per-entity failed/total request counts, keyed the same way as the usage rows below.
+    // Per-conversation failed/total request counts, keyed the same way as the usage rows below.
     const entityAnswerStats = new Map()
     for (const row of entityAnswerStatsResult.data) {
-      const entityId = row.entity_id && row.entity_id !== "0" ? row.entity_id : null
-      entityAnswerStats.set(`${row.entity_type}-${entityId ?? "none"}`, {
+      entityAnswerStats.set(`${row.entity_type}-${row.group_key}`, {
         total: Number(row.total ?? 0),
         failed: Number(row.failed ?? 0),
       })
@@ -875,8 +882,7 @@ app.get("/api/dashboard", async (req, res) => {
 
     const errorCountByEntity = new Map()
     for (const row of usageErrorsResult.data) {
-      const entityId = row.entity_id && row.entity_id !== "0" ? row.entity_id : null
-      errorCountByEntity.set(`${row.entity_type}-${entityId ?? "none"}`, Number(row.error_requests ?? 0))
+      errorCountByEntity.set(`${row.entity_type}-${row.group_key}`, Number(row.error_requests ?? 0))
     }
 
     res.json({
@@ -958,10 +964,15 @@ app.get("/api/dashboard", async (req, res) => {
       usage: usageResult.data.map((row) => {
         const entityType = row.entity_type
         const entityId = row.entity_id && row.entity_id !== "0" ? row.entity_id : null
+        const groupKey = row.group_key
         const solution = entityType === "ticket" && entityId ? solutionByTicket.get(entityId) : null
         return {
           entityType,
           entityId,
+          // Real business id (ticket number, etc.) when there's one; otherwise the chat_id (or,
+          // for a brand-new chat's first turn, the trace_id) that ties this conversation's own
+          // requests together, distinct from every other context-less chat.
+          groupKey,
           uses: Number(row.n ?? 0),
           lastSeen: row.last_seen,
           model: row.model ?? null,
@@ -970,8 +981,8 @@ app.get("/api/dashboard", async (req, res) => {
           avgDurationSec: solution?.avgDurationSec ?? 0,
           costUsd: solution?.costUsd ?? null,
           exceptions: solution?.exceptions ?? 0,
-          errorCount: errorCountByEntity.get(`${entityType}-${entityId ?? "none"}`) ?? 0,
-          noAnswerCount: entityAnswerStats.get(`${entityType}-${entityId ?? "none"}`)?.failed ?? 0,
+          errorCount: errorCountByEntity.get(`${entityType}-${groupKey}`) ?? 0,
+          noAnswerCount: entityAnswerStats.get(`${entityType}-${groupKey}`)?.failed ?? 0,
           runs: solution?.runs ?? [],
         }
       }),
@@ -1114,11 +1125,21 @@ app.get("/api/usage-runs", async (req, res) => {
     const entityType = String(req.query.entityType ?? "none").replace(/'/g, "''")
     const entityIdRaw = req.query.entityId
     const entityId = entityIdRaw && entityIdRaw !== "null" ? String(entityIdRaw).replace(/'/g, "''") : null
+    const groupKeyRaw = req.query.groupKey
+    const groupKey = groupKeyRaw ? String(groupKeyRaw).replace(/'/g, "''") : null
     const range = resolveTimeRange(req)
 
+    // A real entity id scopes to that ticket/article as before. Without one, the row's groupKey
+    // is either a chat_id (most turns) or a trace_id (a chat's first turn, before it has a
+    // chat_id) — see GROUP_KEY_SQL. Falling back to "entity_id IS NULL" only when neither is
+    // given keeps this endpoint working for stale/bookmarked links from before groupKey existed.
     const entityIdFilter = entityId
       ? `attributes->'context'->>'entity_id' = '${entityId}'`
-      : `attributes->'context'->>'entity_id' IS NULL`
+      : groupKey && TRACE_ID_RE.test(groupKey)
+        ? `trace_id = '${groupKey}'`
+        : groupKey
+          ? `attributes->>'chat_id' = '${groupKey}'`
+          : `attributes->'context'->>'entity_id' IS NULL`
 
     const requestsResult = await logfireQuery(
       `SELECT trace_id, start_timestamp, duration FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' AND COALESCE(attributes->'context'->>'entity_type', 'none') = '${entityType}' AND ${entityIdFilter} ORDER BY start_timestamp DESC LIMIT 1000`,
@@ -1224,11 +1245,17 @@ app.get("/api/usage-errors", async (req, res) => {
     const entityType = String(req.query.entityType ?? "none").replace(/'/g, "''")
     const entityIdRaw = req.query.entityId
     const entityId = entityIdRaw && entityIdRaw !== "null" ? String(entityIdRaw).replace(/'/g, "''") : null
+    const groupKeyRaw = req.query.groupKey
+    const groupKey = groupKeyRaw ? String(groupKeyRaw).replace(/'/g, "''") : null
     const range = resolveTimeRange(req)
 
     const entityIdFilter = entityId
       ? `attributes->'context'->>'entity_id' = '${entityId}'`
-      : `attributes->'context'->>'entity_id' IS NULL`
+      : groupKey && TRACE_ID_RE.test(groupKey)
+        ? `trace_id = '${groupKey}'`
+        : groupKey
+          ? `attributes->>'chat_id' = '${groupKey}'`
+          : `attributes->'context'->>'entity_id' IS NULL`
 
     const result = await logfireQuery(
       `SELECT start_timestamp, message, exception_message, exception_type, span_name FROM records

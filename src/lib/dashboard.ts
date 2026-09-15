@@ -72,6 +72,11 @@ export interface DashboardData {
   usage: {
     entityType: string
     entityId: string | null
+    /** Real entity id when there is one; otherwise the chat_id (or, for a chat's first turn
+     * before it has one yet, the trace_id) identifying this specific conversation. Always
+     * present — pass it to fetchUsageRuns/fetchUsageErrors so context-less rows resolve to their
+     * own conversation instead of every context-less chat in the range. */
+    groupKey: string
     uses: number
     lastSeen: string
     model: string | null
@@ -109,11 +114,13 @@ export async function fetchDashboard(env: Environment, range: TimeRange): Promis
 export async function fetchUsageRuns(
   entityType: string,
   entityId: string | null,
+  groupKey: string,
   env: Environment,
   range: TimeRange,
 ): Promise<TicketRun[]> {
   const params = new URLSearchParams({ entityType, env })
   if (entityId) params.set('entityId', entityId)
+  else params.set('groupKey', groupKey)
   const body = await fetchJson<{ runs: TicketRun[] }>(`/api/usage-runs?${params.toString()}&${rangeQuery(range)}`)
   return body.runs
 }
@@ -127,11 +134,13 @@ export interface UsageErrorExample {
 export async function fetchUsageErrors(
   entityType: string,
   entityId: string | null,
+  groupKey: string,
   env: Environment,
   range: TimeRange,
 ): Promise<UsageErrorExample[]> {
   const params = new URLSearchParams({ entityType, env })
   if (entityId) params.set('entityId', entityId)
+  else params.set('groupKey', groupKey)
   const body = await fetchJson<{ examples: UsageErrorExample[] }>(
     `/api/usage-errors?${params.toString()}&${rangeQuery(range)}`,
   )

@@ -1245,10 +1245,10 @@ function Dashboard() {
   )
 
   const openUsageErrorsModal = useCallback(
-    (entityType: string, entityId: string | null) => {
+    (entityType: string, entityId: string | null, groupKey: string) => {
       const title = entityId ? `#${entityId}` : entityType
       setUsageErrorsModal({ title, items: null, loading: true, error: null })
-      fetchUsageErrors(entityType, entityId, environment, timeRange)
+      fetchUsageErrors(entityType, entityId, groupKey, environment, timeRange)
         .then((items) => setUsageErrorsModal({ title, items, loading: false, error: null }))
         .catch((e: Error) => setUsageErrorsModal({ title, items: null, loading: false, error: e.message }))
     },
@@ -1256,12 +1256,12 @@ function Dashboard() {
   )
 
   const loadUsageRuns = useCallback(
-    (entityType: string, entityId: string | null) => {
-      const key = `${entityType}-${entityId ?? 'none'}`
+    (entityType: string, entityId: string | null, groupKey: string) => {
+      const key = `${entityType}-${groupKey}`
       if (loadedUsageKeys.current.has(key)) return
       loadedUsageKeys.current.add(key)
       setUsageRunsByKey((prev) => ({ ...prev, [key]: { items: null, loading: true, error: null } }))
-      fetchUsageRuns(entityType, entityId, environment, timeRange)
+      fetchUsageRuns(entityType, entityId, groupKey, environment, timeRange)
         .then((items) => setUsageRunsByKey((prev) => ({ ...prev, [key]: { items, loading: false, error: null } })))
         .catch((e: Error) =>
           setUsageRunsByKey((prev) => ({ ...prev, [key]: { items: null, loading: false, error: e.message } })),
@@ -1581,7 +1581,7 @@ function Dashboard() {
                 <Table.Body>
                   {pagedUsage.map((row) => {
                     const link = entityLink(row.entityType, row.entityId)
-                    const usageKey = `${row.entityType}-${row.entityId ?? 'none'}`
+                    const usageKey = `${row.entityType}-${row.groupKey}`
                     return (
                       <Table.Row
                         key={usageKey}
@@ -1595,7 +1595,7 @@ function Dashboard() {
                           </ErrorBoundary>
                         }
                         onOpenChange={() => {
-                          loadUsageRuns(row.entityType, row.entityId)
+                          loadUsageRuns(row.entityType, row.entityId, row.groupKey)
                           loadTicketInfo(row.entityType, row.entityId)
                         }}
                       >
@@ -1639,7 +1639,7 @@ function Dashboard() {
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation()
-                                openUsageErrorsModal(row.entityType, row.entityId)
+                                openUsageErrorsModal(row.entityType, row.entityId, row.groupKey)
                               }}
                               style={{ all: 'unset', cursor: 'pointer' }}
                             >
