@@ -812,6 +812,20 @@ app.get("/api/dashboard", async (req, res) => {
     const chatTotals = chatAnswerTotalsResult.data[0] ?? { total: 0, failed: 0 }
     const noAnswerCount = Number(chatTotals.failed ?? 0)
     const totalRequests = Number(chatTotals.total ?? 0)
+
+    // TEMP DIAGNOSTIC — investigating every row showing failed === total. Remove once resolved.
+    try {
+      const answeredSample = await logfireQuery(`${answeredTracesSql(env)} LIMIT 5`, range)
+      console.error(
+        "[diag] chatTotals=%j entityRows=%d answeredSampleCount=%d answeredSample=%j",
+        chatTotals,
+        entityAnswerStatsResult.data.length,
+        answeredSample.data.length,
+        answeredSample.data,
+      )
+    } catch (diagErr) {
+      console.error("[diag] answeredTracesSql probe failed:", diagErr.message)
+    }
     const noAnswerPercent = totalRequests > 0 ? (noAnswerCount / totalRequests) * 100 : 0
 
     const allTickets = groupRunsByTicket(solutionRunsResult.data)
