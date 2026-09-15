@@ -515,19 +515,28 @@ function groupStepsForChart(steps: RunStep[]): { name: string; duration: number 
     .slice(0, 5)
 }
 
+/** Whether a run actually delivered an answer is the primary signal — `outcome === 'exception'`
+ * only means some span in the trace logged a warning/error level line, which can happen on a
+ * retried tool call or a transient hiccup that the run recovered from and still produced real
+ * output for. Only demote to a hard failure when there's genuinely no answer to show. */
+function runStatusBadge(run: TicketRun): { label: string; state: 'success' | 'alert' | 'warning' } {
+  if (run.hasNoAnswer) {
+    return { label: run.outcome === 'exception' ? 'Failed' : 'Empty response', state: 'alert' }
+  }
+  if (run.outcome === 'exception') {
+    return { label: 'Completed (error)', state: 'warning' }
+  }
+  return { label: 'Completed', state: 'success' }
+}
+
 /** A run's status line, shown as the always-visible Accordion.Item title so scanning a list of
  * runs for the one that failed doesn't require opening each one. */
 function RunStatusLine({ run }: { run: TicketRun }) {
+  const status = runStatusBadge(run)
   return (
     <Inline align="center" gap={8}>
       <strong>{timeFormatter.format(new Date(run.timestamp))}</strong>
-      {run.outcome === 'exception' ? (
-        <Badge state="alert">Failed</Badge>
-      ) : run.hasNoAnswer ? (
-        <Badge state="alert">Empty response</Badge>
-      ) : (
-        <Badge state="success">Completed</Badge>
-      )}
+      <Badge state={status.state}>{status.label}</Badge>
       <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
       {run.costUsd > 0 && <span className="bfc-base-2">{preciseCostFormatter.format(run.costUsd)}</span>}
     </Inline>
@@ -728,22 +737,19 @@ function ConversationOverview({
         Messages ({combined.length})
       </small>
       <Grid gap={4} style={{ maxHeight: 220, overflowY: 'auto' }}>
-        {combined.map(({ run, kind }) => (
-          <Inline key={run.traceId} align="center" gap={8}>
-            <small className="bfc-base-2" style={{ minWidth: 70 }}>
-              {timeFormatter.format(new Date(run.timestamp))}
-            </small>
-            <Badge state="neutral">{kind}</Badge>
-            {run.outcome === 'exception' ? (
-              <Badge state="alert">Failed</Badge>
-            ) : run.hasNoAnswer ? (
-              <Badge state="alert">Empty response</Badge>
-            ) : (
-              <Badge state="success">OK</Badge>
-            )}
-            <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
-          </Inline>
-        ))}
+        {combined.map(({ run, kind }) => {
+          const status = runStatusBadge(run)
+          return (
+            <Inline key={run.traceId} align="center" gap={8}>
+              <small className="bfc-base-2" style={{ minWidth: 70 }}>
+                {timeFormatter.format(new Date(run.timestamp))}
+              </small>
+              <Badge state="neutral">{kind}</Badge>
+              <Badge state={status.state}>{status.label}</Badge>
+              <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
+            </Inline>
+          )
+        })}
       </Grid>
     </Box>
   )
