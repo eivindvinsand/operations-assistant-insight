@@ -515,6 +515,28 @@ function groupStepsForChart(steps: RunStep[]): { name: string; duration: number 
     .slice(0, 5)
 }
 
+/** A run's status line, shown as the always-visible Accordion.Item title so scanning a list of
+ * runs for the one that failed doesn't require opening each one. */
+function RunStatusLine({ run }: { run: TicketRun }) {
+  return (
+    <Inline align="center" gap={8}>
+      <strong>{timeFormatter.format(new Date(run.timestamp))}</strong>
+      {run.outcome === 'exception' ? (
+        <Badge state="alert">Failed</Badge>
+      ) : run.hasNoAnswer ? (
+        <Badge state="alert">Empty response</Badge>
+      ) : (
+        <Badge state="success">Completed</Badge>
+      )}
+      <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
+      {run.costUsd > 0 && <span className="bfc-base-2">{preciseCostFormatter.format(run.costUsd)}</span>}
+    </Inline>
+  )
+}
+
+/** Full run detail — output, failed steps, time breakdown, and the step-by-step list — kept
+ * collapsed behind the status line by default so opening a row doesn't dump every run's full
+ * output and steps on screen at once. */
 function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
   return (
     <Grid gap={12} style={{ padding: '4px 0 12px' }}>
@@ -524,82 +546,75 @@ function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
         const chartData = groupStepsForChart(run.steps)
         return (
           <Box key={run.traceId} padding radius border background="base">
-            <Inline align="center" gap={8} style={{ marginBottom: 12 }}>
-              <strong>{timeFormatter.format(new Date(run.timestamp))}</strong>
-              {run.outcome === 'exception' ? (
-                <Badge state="alert">Failed</Badge>
-              ) : (
-                <Badge state="success">Completed</Badge>
-              )}
-              <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
-              {run.costUsd > 0 && (
-                <span className="bfc-base-2">{preciseCostFormatter.format(run.costUsd)}</span>
-              )}
-            </Inline>
+            <Accordion mode="compact">
+              <Accordion.Item title={<RunStatusLine run={run} />}>
+                <div style={{ paddingTop: 12 }}>
+                  {run.solution && (
+                    <Box padding radius background="base-2" style={{ marginBottom: 12 }}>
+                      <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>Output</small>
+                      <Markdown text={run.solution} />
+                    </Box>
+                  )}
 
-            {run.solution && (
-              <Box padding radius background="base-2" style={{ marginBottom: 12 }}>
-                <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>Output</small>
-                <Markdown text={run.solution} />
-              </Box>
-            )}
+                  {failedSteps.length > 0 && (
+                    <Accordion mode="compact" style={{ marginBottom: 12 }}>
+                      <Accordion.Item
+                        title={
+                          <Inline align="center" gap={8}>
+                            <Icon icon={faTriangleExclamation} className="bfc-alert" />
+                            <span className="bfc-alert" style={{ fontWeight: 600 }}>
+                              {failedSteps.length} failed step{failedSteps.length > 1 ? 's' : ''}
+                            </span>
+                          </Inline>
+                        }
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {failedSteps.map((step, i) => (
+                            <div key={i}>
+                              <Inline align="center" gap={8}>
+                                <span className="bfc-alert" style={{ fontWeight: 600 }}>{step.label}</span>
+                                {step.exceptionType && <Badge state="alert">{step.exceptionType}</Badge>}
+                              </Inline>
+                              {step.exceptionMessage && (
+                                <small className="bfc-alert" style={{ display: 'block', marginTop: 2, wordBreak: 'break-word' }}>
+                                  {step.exceptionMessage}
+                                </small>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </Accordion.Item>
+                    </Accordion>
+                  )}
 
-            {failedSteps.length > 0 && (
-              <Accordion mode="compact" style={{ marginBottom: 12 }}>
-                <Accordion.Item
-                  title={
-                    <Inline align="center" gap={8}>
-                      <Icon icon={faTriangleExclamation} className="bfc-alert" />
-                      <span className="bfc-alert" style={{ fontWeight: 600 }}>
-                        {failedSteps.length} failed step{failedSteps.length > 1 ? 's' : ''}
-                      </span>
-                    </Inline>
-                  }
-                >
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {failedSteps.map((step, i) => (
-                      <div key={i}>
-                        <Inline align="center" gap={8}>
-                          <span className="bfc-alert" style={{ fontWeight: 600 }}>{step.label}</span>
-                          {step.exceptionType && <Badge state="alert">{step.exceptionType}</Badge>}
-                        </Inline>
-                        {step.exceptionMessage && (
-                          <small className="bfc-alert" style={{ display: 'block', marginTop: 2, wordBreak: 'break-word' }}>
-                            {step.exceptionMessage}
-                          </small>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </Accordion.Item>
-              </Accordion>
-            )}
+                  {chartData.length > 0 && (
+                    <Box padding radius background="base-2" style={{ marginBottom: 12 }}>
+                      <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>Time breakdown</small>
+                      <ResponsiveContainer width="100%" height={Math.max(60, chartData.length * 28)}>
+                        <BarChart data={chartData} layout="vertical" margin={{ left: 0, right: 30 }}>
+                          <XAxis type="number" axisLine={false} tickLine={false} tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 10 }} />
+                          <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 10 }} width={140} />
+                          <Tooltip cursor={false} formatter={(v) => [`${v}s`, 'Duration']} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
+                          <Bar dataKey="duration" name="Duration" fill="var(--bfc-chill)" radius={3} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </Box>
+                  )}
 
-            {chartData.length > 0 && (
-              <Box padding radius background="base-2" style={{ marginBottom: 12 }}>
-                <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>Time breakdown</small>
-                <ResponsiveContainer width="100%" height={Math.max(60, chartData.length * 28)}>
-                  <BarChart data={chartData} layout="vertical" margin={{ left: 0, right: 30 }}>
-                    <XAxis type="number" axisLine={false} tickLine={false} tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 10 }} />
-                    <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 10 }} width={140} />
-                    <Tooltip cursor={false} formatter={(v) => [`${v}s`, 'Duration']} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
-                    <Bar dataKey="duration" name="Duration" fill="var(--bfc-chill)" radius={3} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </Box>
-            )}
-
-            {hasSteps ? (
-              <Accordion mode="compact">
-                {run.steps.map((step, i) => (
-                  <Accordion.Item key={i} title={<StepTitle index={i} step={step} />}>
-                    <StepOutput step={step} />
-                  </Accordion.Item>
-                ))}
-              </Accordion>
-            ) : (
-              <small className="bfc-base-2">No steps recorded for this run.</small>
-            )}
+                  {hasSteps ? (
+                    <Accordion mode="compact">
+                      {run.steps.map((step, i) => (
+                        <Accordion.Item key={i} title={<StepTitle index={i} step={step} />}>
+                          <StepOutput step={step} />
+                        </Accordion.Item>
+                      ))}
+                    </Accordion>
+                  ) : (
+                    <small className="bfc-base-2">No steps recorded for this run.</small>
+                  )}
+                </div>
+              </Accordion.Item>
+            </Accordion>
           </Box>
         )
       })}
@@ -690,6 +705,50 @@ class ErrorBoundary extends Component<{ children: ReactNode; label: string }, { 
   }
 }
 
+/** Every solution-agent run and chat exchange for this entity, newest first, collapsed to a
+ * single status line each — so a failed message can be spotted without scrolling through the
+ * full per-run detail below. */
+function ConversationOverview({
+  solutionRuns,
+  chatRuns,
+}: {
+  solutionRuns: TicketRun[]
+  chatRuns: TicketRun[] | null
+}) {
+  const combined = [
+    ...solutionRuns.map((run) => ({ run, kind: 'Solution run' as const })),
+    ...(chatRuns ?? []).map((run) => ({ run, kind: 'Chat' as const })),
+  ].sort((a, b) => new Date(b.run.timestamp).getTime() - new Date(a.run.timestamp).getTime())
+
+  if (combined.length === 0) return null
+
+  return (
+    <Box padding radius background="base-2">
+      <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
+        Messages ({combined.length})
+      </small>
+      <Grid gap={4} style={{ maxHeight: 220, overflowY: 'auto' }}>
+        {combined.map(({ run, kind }) => (
+          <Inline key={run.traceId} align="center" gap={8}>
+            <small className="bfc-base-2" style={{ minWidth: 70 }}>
+              {timeFormatter.format(new Date(run.timestamp))}
+            </small>
+            <Badge state="neutral">{kind}</Badge>
+            {run.outcome === 'exception' ? (
+              <Badge state="alert">Failed</Badge>
+            ) : run.hasNoAnswer ? (
+              <Badge state="alert">Empty response</Badge>
+            ) : (
+              <Badge state="success">OK</Badge>
+            )}
+            <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
+          </Inline>
+        ))}
+      </Grid>
+    </Box>
+  )
+}
+
 function UsageRowDetails({
   solutionRuns,
   chatRuns,
@@ -706,6 +765,8 @@ function UsageRowDetails({
           <TicketInfoPanel ticketInfo={ticketInfo} />
         </Box>
       )}
+
+      <ConversationOverview solutionRuns={solutionRuns} chatRuns={chatRuns?.items ?? null} />
 
       {solutionRuns.length > 0 && (
         <Box>
@@ -1505,7 +1566,9 @@ function Dashboard() {
                     <Table.HeaderCell>Solution runs</Table.HeaderCell>
                     <Table.HeaderCell>Avg duration</Table.HeaderCell>
                     <Table.HeaderCell>Cost</Table.HeaderCell>
-                    <Table.HeaderCell>Response</Table.HeaderCell>
+                    <Table.HeaderCell title="Requests with an empty last chat message, out of total requests">
+                      Response
+                    </Table.HeaderCell>
                     <Table.HeaderCell>Errors</Table.HeaderCell>
                   </Table.Row>
                 </Table.Header>
@@ -1558,11 +1621,11 @@ function Dashboard() {
                           {row.costUsd != null ? preciseCostFormatter.format(row.costUsd) : '—'}
                         </Table.Cell>
                         <Table.Cell>
-                          {row.noAnswerCount > 0 ? (
-                            <Badge state="alert">No</Badge>
-                          ) : (
-                            <Badge state="success">Yes</Badge>
-                          )}
+                          <span title={`${row.noAnswerCount} of ${row.uses} requests got an empty response`}>
+                            <Badge state={row.noAnswerCount > 0 ? 'alert' : 'success'}>
+                              {row.noAnswerCount}/{row.uses}
+                            </Badge>
+                          </span>
                         </Table.Cell>
                         <Table.Cell>
                           {row.errorCount > 0 ? (

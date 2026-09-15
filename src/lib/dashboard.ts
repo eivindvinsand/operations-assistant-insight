@@ -49,9 +49,11 @@ export interface DashboardData {
     costUsd: number
     uniqueUsers: number
     uses: number
+    /** Requests across the whole selected range with an empty last chat message, not just the
+     * top rows shown in the conversation-log table. */
     noAnswerCount: number
     noAnswerPercent: number
-    totalEntities: number
+    totalRequests: number
   }
   context: { type: string; count: number }[]
   dailyUsers: { day: string; users: number; messages: number; cumulativeUsers: number }[]
@@ -79,6 +81,7 @@ export interface DashboardData {
     costUsd: number | null
     exceptions: number
     errorCount: number
+    /** Count of this entity's `uses` requests that got an empty last chat message. */
     noAnswerCount: number
     runs: TicketRun[]
   }[]

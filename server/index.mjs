@@ -50,9 +50,36 @@ function sqlList(values) {
 
 const SKIPPED_SPANS = new Set(["POST /api/v2/chat", "OPTIONS /api/v2/chat", "chat.request"])
 
-/** A trace counts as "answered" if it produced a chat message or a solution-agent
- * final result; used everywhere a chat.request is checked for a real response. */
-const ANSWERED_CONDITION_SQL = `((span_name LIKE 'chat %' AND attributes->'gen_ai.output.messages' IS NOT NULL AND attributes->'gen_ai.output.messages' != '[]') OR (attributes->>'gen_ai.operation.name' = 'invoke_agent' AND attributes->>'final_result' IS NOT NULL AND attributes->>'final_result' != ''))`
+/** A trace's answer is judged by its single most-recent chat or agent-reasoning span, not
+ * "did any span ever produce text" — a trace that trails off into an empty final turn counts as
+ * unanswered even if an earlier turn had content. Checks the LAST message's actual text content
+ * (not just whether the message array is non-empty), per how a human reading the transcript would
+ * judge it. Mirrors the per-run check in /api/usage-runs (steps filtered to type agent/chat, last
+ * one wins) so the two can't disagree. `traceIdFilter`, when given, scopes the underlying span scan
+ * to just those traces instead of the whole environment. */
+function answeredTracesSql(env, traceIdFilter) {
+  const filter = traceIdFilter && traceIdFilter.length > 0 ? `AND trace_id IN (${sqlList(traceIdFilter)})` : ""
+  return `SELECT lc.trace_id FROM (
+      SELECT trace_id, span_name, attributes,
+        ROW_NUMBER() OVER (PARTITION BY trace_id ORDER BY start_timestamp DESC) as rn
+      FROM records
+      WHERE deployment_environment = '${env}'
+        AND (span_name LIKE 'chat %' OR attributes->>'gen_ai.operation.name' = 'invoke_agent')
+        ${filter}
+    ) lc
+    WHERE lc.rn = 1
+    AND (
+      (lc.attributes->>'gen_ai.operation.name' = 'invoke_agent' AND COALESCE(lc.attributes->>'final_result', '') != '')
+      OR (
+        lc.span_name LIKE 'chat %'
+        AND jsonb_typeof(lc.attributes->'gen_ai.output.messages'->-1->'parts') = 'array'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements(lc.attributes->'gen_ai.output.messages'->-1->'parts') part
+          WHERE part->>'type' = 'text' AND COALESCE(part->>'content', '') != ''
+        )
+      )
+    )`
+}
 
 /** Tool call failures come in two shapes: normal agent-routed MCP calls, and "direct" calls that
  * bypass the agent (used by retrieve_initial_data's background prefetches). Each shape uses a
@@ -608,7 +635,8 @@ app.get("/api/dashboard", async (req, res) => {
       dailyErrorsByKindResult,
       dailyToolFailuresByToolResult,
       dailySecurityJudgeByKindResult,
-      allEntitiesLatestResult,
+      entityAnswerStatsResult,
+      chatAnswerTotalsResult,
       dailyNoAnswerResult,
     ] = await Promise.all([
       logfireQuery(
@@ -726,18 +754,33 @@ app.get("/api/dashboard", async (req, res) => {
         `SELECT date_trunc('day', start_timestamp) as day, span_name, count(*) as n FROM records WHERE span_name IN (${SECURITY_JUDGE_SPAN_LIST}) AND deployment_environment = '${env}' GROUP BY 1, 2 ORDER BY 1`,
         range,
       ),
-      // Separate from usageResult (the conversation-log table), so the failed-responses rate below
-      // isn't tied to whatever cap that table happens to use for display purposes.
+      // Per-entity request/failure counts across ALL of that entity's chat.request traces (not
+      // just its latest one), so the conversation-log "Response" column can show a real x/y
+      // fraction. Ordered and capped the same way as usageResult so the two line up on the same
+      // set of entities.
       logfireQuery(
-        `SELECT entity_type, entity_id, trace_id FROM (
-          SELECT
-            COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
-            attributes->'context'->>'entity_id' as entity_id,
-            trace_id,
-            start_timestamp,
-            ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), COALESCE(attributes->'context'->>'entity_id', '0') ORDER BY start_timestamp DESC) as rn
+        `SELECT entity_type, entity_id,
+          count(DISTINCT cr.trace_id) as total,
+          count(DISTINCT CASE WHEN a.trace_id IS NULL THEN cr.trace_id END) as failed,
+          max(cr.start_timestamp) as last_seen
+        FROM (
+          SELECT trace_id, COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
+            attributes->'context'->>'entity_id' as entity_id, start_timestamp
           FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
-        ) WHERE rn = 1 LIMIT 1000`,
+        ) cr
+        LEFT JOIN (${answeredTracesSql(env)}) a ON a.trace_id = cr.trace_id
+        GROUP BY 1, 2 ORDER BY last_seen DESC LIMIT 1000`,
+        range,
+      ),
+      // Headline failed-responses rate: a single ungrouped total/failed count across every
+      // chat.request trace in range, so it isn't capped by however many distinct entities exist
+      // (unlike a per-entity GROUP BY, which the query API's 1000-row response ceiling could
+      // still truncate) and so it uses the exact same request-level definition as the trend chart.
+      logfireQuery(
+        `SELECT count(DISTINCT cr.trace_id) as total,
+          count(DISTINCT CASE WHEN a.trace_id IS NULL THEN cr.trace_id END) as failed
+        FROM (SELECT trace_id FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}') cr
+        LEFT JOIN (${answeredTracesSql(env)}) a ON a.trace_id = cr.trace_id`,
         range,
       ),
       // Daily failed-response rate for the trend chart, aggregated in SQL so the per-day counts
@@ -750,30 +793,29 @@ app.get("/api/dashboard", async (req, res) => {
           count(DISTINCT r.trace_id) as total,
           count(DISTINCT CASE WHEN a.trace_id IS NULL THEN r.trace_id END) as no_answer
         FROM records r
-        LEFT JOIN (SELECT DISTINCT trace_id FROM records WHERE deployment_environment = '${env}' AND ${ANSWERED_CONDITION_SQL}) a ON a.trace_id = r.trace_id
+        LEFT JOIN (${answeredTracesSql(env)}) a ON a.trace_id = r.trace_id
         WHERE r.span_name = 'chat.request' AND r.deployment_environment = '${env}'
         GROUP BY 1 ORDER BY 1`,
         range,
       ),
     ])
 
-    // Headline failed-responses rate: every entity's latest chat.request in range (not just the
-    // 100 shown in the conversation-log table), so it reflects the whole selected time range.
-    const allEntityTraceIds = allEntitiesLatestResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
-    const answeredTracesResult = await logfireQuery(
-      `SELECT DISTINCT trace_id FROM records WHERE trace_id IN (${sqlList(allEntityTraceIds)}) AND deployment_environment = '${env}' AND ${ANSWERED_CONDITION_SQL}`,
-      range,
-    )
-    const answeredTraces = new Set(answeredTracesResult.data.map((r) => r.trace_id))
-    const noAnswerByEntity = new Map()
-    for (const row of allEntitiesLatestResult.data) {
+    // Per-entity failed/total request counts, keyed the same way as the usage rows below.
+    const entityAnswerStats = new Map()
+    for (const row of entityAnswerStatsResult.data) {
       const entityId = row.entity_id && row.entity_id !== "0" ? row.entity_id : null
-      const key = `${row.entity_type}-${entityId ?? "none"}`
-      noAnswerByEntity.set(key, answeredTraces.has(row.trace_id) ? 0 : 1)
+      entityAnswerStats.set(`${row.entity_type}-${entityId ?? "none"}`, {
+        total: Number(row.total ?? 0),
+        failed: Number(row.failed ?? 0),
+      })
     }
-    const noAnswerCount = [...noAnswerByEntity.values()].filter((v) => v === 1).length
-    const totalEntities = allEntitiesLatestResult.data.length
-    const noAnswerPercent = totalEntities > 0 ? (noAnswerCount / totalEntities) * 100 : 0
+
+    // Headline failed-responses rate: every chat.request in range, not just each entity's latest
+    // one, so it reflects the same request-level definition as the trend chart below it.
+    const chatTotals = chatAnswerTotalsResult.data[0] ?? { total: 0, failed: 0 }
+    const noAnswerCount = Number(chatTotals.failed ?? 0)
+    const totalRequests = Number(chatTotals.total ?? 0)
+    const noAnswerPercent = totalRequests > 0 ? (noAnswerCount / totalRequests) * 100 : 0
 
     const allTickets = groupRunsByTicket(solutionRunsResult.data)
     const detailedTickets = allTickets.slice(0, 15)
@@ -792,6 +834,8 @@ app.get("/api/dashboard", async (req, res) => {
       const runs = t.runs.map((r) => {
         const steps = stepsByTrace.get(r.trace_id)
         if (!steps) {
+          // Outside detailedTickets — no step detail was fetched, so whether this run actually
+          // answered is unknown rather than false; don't flag it as a no-answer on no evidence.
           return {
             traceId: r.trace_id,
             timestamp: r.start_timestamp,
@@ -801,12 +845,15 @@ app.get("/api/dashboard", async (req, res) => {
             solution: null,
             costUsd: null,
             failureReason: null,
+            hasNoAnswer: false,
           }
         }
         const agentSteps = steps.filter((s) => s.type === "agent" && s.output)
         const solution = agentSteps.length > 0 ? agentSteps[agentSteps.length - 1].output : null
         const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
         const failedStep = steps.find((s) => s.isError)
+        const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
+        const lastContentStep = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1] : null
         return {
           traceId: r.trace_id,
           timestamp: r.start_timestamp,
@@ -816,6 +863,7 @@ app.get("/api/dashboard", async (req, res) => {
           solution,
           costUsd,
           failureReason: failedStep?.label ?? null,
+          hasNoAnswer: !lastContentStep || !lastContentStep.output,
         }
       })
       const knownCosts = runs.filter((r) => r.costUsd != null)
@@ -858,7 +906,7 @@ app.get("/api/dashboard", async (req, res) => {
         uses: Number(usageTodayRow.uses ?? 0),
         noAnswerCount,
         noAnswerPercent,
-        totalEntities,
+        totalRequests,
       },
       context: contextResult.data.map((row) => ({ type: row.entity_type, count: Number(row.n ?? 0) })),
       dailyUsers: (() => {
@@ -938,7 +986,7 @@ app.get("/api/dashboard", async (req, res) => {
           costUsd: solution?.costUsd ?? null,
           exceptions: solution?.exceptions ?? 0,
           errorCount: errorCountByEntity.get(`${entityType}-${entityId ?? "none"}`) ?? 0,
-          noAnswerCount: noAnswerByEntity.get(`${entityType}-${entityId ?? "none"}`) ?? 0,
+          noAnswerCount: entityAnswerStats.get(`${entityType}-${entityId ?? "none"}`)?.failed ?? 0,
           runs: solution?.runs ?? [],
         }
       }),
@@ -1137,10 +1185,7 @@ app.get("/api/no-answer", async (req, res) => {
     )
 
     const traceIds = requestsResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
-    const answeredResult = await logfireQuery(
-      `SELECT DISTINCT trace_id FROM records WHERE trace_id IN (${sqlList(traceIds)}) AND deployment_environment = '${env}' AND ${ANSWERED_CONDITION_SQL}`,
-      range,
-    )
+    const answeredResult = await logfireQuery(answeredTracesSql(env, traceIds), range)
     const answeredTraces = new Set(answeredResult.data.map((r) => r.trace_id))
 
     const noAnswerRows = requestsResult.data.filter((row) => !answeredTraces.has(row.trace_id))
