@@ -50,32 +50,21 @@ function sqlList(values) {
 
 const SKIPPED_SPANS = new Set(["POST /api/v2/chat", "OPTIONS /api/v2/chat", "chat.request"])
 
-/** A trace's answer is judged by its single most-recent chat or agent-reasoning span, not
- * "did any span ever produce text" — a trace that trails off into an empty final turn counts as
- * unanswered even if an earlier turn had content. Logfire's SQL surface only exposes `->`/`->>`
- * for JSON (no jsonb_typeof/jsonb_array_elements — those 500 with "Invalid function"), so this
- * checks the last span's message array for presence/non-emptiness rather than drilling into a
- * specific message's text content. `traceIdFilter`, when given, scopes the underlying span scan
- * to just those traces instead of the whole environment. */
+/** A trace's answer is whether ANY of its chat/agent-reasoning spans produced real content —
+ * not just its last one. A trailing empty turn (the model finishing with nothing further to add
+ * after already answering) must not overrule an earlier turn that had real output; that's exactly
+ * what `solution` elsewhere in this file already checks for by taking the last step that HAD
+ * output, not the last step regardless of output. `traceIdFilter`, when given, scopes the
+ * underlying span scan to just those traces instead of the whole environment. */
 function answeredTracesSql(env, traceIdFilter) {
   const filter = traceIdFilter && traceIdFilter.length > 0 ? `AND trace_id IN (${sqlList(traceIdFilter)})` : ""
-  return `SELECT lc.trace_id FROM (
-      SELECT trace_id, span_name, attributes,
-        ROW_NUMBER() OVER (PARTITION BY trace_id ORDER BY start_timestamp DESC) as rn
-      FROM records
-      WHERE deployment_environment = '${env}'
-        AND (span_name LIKE 'chat %' OR attributes->>'gen_ai.operation.name' = 'invoke_agent')
-        ${filter}
-    ) lc
-    WHERE lc.rn = 1
-    AND (
-      (lc.attributes->>'gen_ai.operation.name' = 'invoke_agent' AND COALESCE(lc.attributes->>'final_result', '') != '')
-      OR (
-        lc.span_name LIKE 'chat %'
-        AND lc.attributes->'gen_ai.output.messages' IS NOT NULL
-        AND lc.attributes->'gen_ai.output.messages' != '[]'
+  return `SELECT DISTINCT trace_id FROM records
+    WHERE deployment_environment = '${env}'
+      AND (
+        (attributes->>'gen_ai.operation.name' = 'invoke_agent' AND COALESCE(attributes->>'final_result', '') != '')
+        OR (span_name LIKE 'chat %' AND attributes->'gen_ai.output.messages' IS NOT NULL AND attributes->'gen_ai.output.messages' != '[]')
       )
-    )`
+      ${filter}`
 }
 
 /** Tool call failures come in two shapes: normal agent-routed MCP calls, and "direct" calls that
@@ -812,20 +801,6 @@ app.get("/api/dashboard", async (req, res) => {
     const chatTotals = chatAnswerTotalsResult.data[0] ?? { total: 0, failed: 0 }
     const noAnswerCount = Number(chatTotals.failed ?? 0)
     const totalRequests = Number(chatTotals.total ?? 0)
-
-    // TEMP DIAGNOSTIC — investigating every row showing failed === total. Remove once resolved.
-    try {
-      const answeredSample = await logfireQuery(`${answeredTracesSql(env)} LIMIT 5`, range)
-      console.error(
-        "[diag] chatTotals=%j entityRows=%d answeredSampleCount=%d answeredSample=%j",
-        chatTotals,
-        entityAnswerStatsResult.data.length,
-        answeredSample.data.length,
-        answeredSample.data,
-      )
-    } catch (diagErr) {
-      console.error("[diag] answeredTracesSql probe failed:", diagErr.message)
-    }
     const noAnswerPercent = totalRequests > 0 ? (noAnswerCount / totalRequests) * 100 : 0
 
     const allTickets = groupRunsByTicket(solutionRunsResult.data)
@@ -863,8 +838,6 @@ app.get("/api/dashboard", async (req, res) => {
         const solution = agentSteps.length > 0 ? agentSteps[agentSteps.length - 1].output : null
         const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
         const failedStep = steps.find((s) => s.isError)
-        const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
-        const lastContentStep = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1] : null
         return {
           traceId: r.trace_id,
           timestamp: r.start_timestamp,
@@ -874,7 +847,8 @@ app.get("/api/dashboard", async (req, res) => {
           solution,
           costUsd,
           failureReason: failedStep?.label ?? null,
-          hasNoAnswer: !lastContentStep || !lastContentStep.output,
+          // An empty trailing turn after the real answer must not overrule the answer itself.
+          hasNoAnswer: !solution,
         }
       })
       const knownCosts = runs.filter((r) => r.costUsd != null)
@@ -1161,10 +1135,6 @@ app.get("/api/usage-runs", async (req, res) => {
       const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
       const failedStep = steps.find((s) => s.isError)
 
-      const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
-      const lastContentStep = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1] : null
-      const hasNoAnswer = !lastContentStep || !lastContentStep.output
-
       return {
         traceId: row.trace_id,
         timestamp: row.start_timestamp,
@@ -1174,7 +1144,10 @@ app.get("/api/usage-runs", async (req, res) => {
         solution,
         costUsd: costUsd > 0 ? costUsd : null,
         failureReason: failedStep?.label ?? null,
-        hasNoAnswer,
+        // Same steps `solution` is drawn from — an empty trailing turn (the model saying
+        // nothing further after the real answer) must not overrule the answer that's already
+        // there just because it happened to run last.
+        hasNoAnswer: !solution,
       }
     })
 
