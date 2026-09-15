@@ -52,10 +52,10 @@ const SKIPPED_SPANS = new Set(["POST /api/v2/chat", "OPTIONS /api/v2/chat", "cha
 
 /** A trace's answer is judged by its single most-recent chat or agent-reasoning span, not
  * "did any span ever produce text" — a trace that trails off into an empty final turn counts as
- * unanswered even if an earlier turn had content. Checks the LAST message's actual text content
- * (not just whether the message array is non-empty), per how a human reading the transcript would
- * judge it. Mirrors the per-run check in /api/usage-runs (steps filtered to type agent/chat, last
- * one wins) so the two can't disagree. `traceIdFilter`, when given, scopes the underlying span scan
+ * unanswered even if an earlier turn had content. Logfire's SQL surface only exposes `->`/`->>`
+ * for JSON (no jsonb_typeof/jsonb_array_elements — those 500 with "Invalid function"), so this
+ * checks the last span's message array for presence/non-emptiness rather than drilling into a
+ * specific message's text content. `traceIdFilter`, when given, scopes the underlying span scan
  * to just those traces instead of the whole environment. */
 function answeredTracesSql(env, traceIdFilter) {
   const filter = traceIdFilter && traceIdFilter.length > 0 ? `AND trace_id IN (${sqlList(traceIdFilter)})` : ""
@@ -72,11 +72,8 @@ function answeredTracesSql(env, traceIdFilter) {
       (lc.attributes->>'gen_ai.operation.name' = 'invoke_agent' AND COALESCE(lc.attributes->>'final_result', '') != '')
       OR (
         lc.span_name LIKE 'chat %'
-        AND jsonb_typeof(lc.attributes->'gen_ai.output.messages'->-1->'parts') = 'array'
-        AND EXISTS (
-          SELECT 1 FROM jsonb_array_elements(lc.attributes->'gen_ai.output.messages'->-1->'parts') part
-          WHERE part->>'type' = 'text' AND COALESCE(part->>'content', '') != ''
-        )
+        AND lc.attributes->'gen_ai.output.messages' IS NOT NULL
+        AND lc.attributes->'gen_ai.output.messages' != '[]'
       )
     )`
 }
