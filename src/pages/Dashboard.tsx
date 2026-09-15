@@ -1572,8 +1572,8 @@ function Dashboard() {
                     <Table.HeaderCell>Solution runs</Table.HeaderCell>
                     <Table.HeaderCell>Avg duration</Table.HeaderCell>
                     <Table.HeaderCell>Cost</Table.HeaderCell>
-                    <Table.HeaderCell title="Requests with an empty last chat message, out of total requests">
-                      Response
+                    <Table.HeaderCell title="Requests that got an empty response, out of total requests">
+                      Failed responses
                     </Table.HeaderCell>
                     <Table.HeaderCell>Errors</Table.HeaderCell>
                   </Table.Row>
