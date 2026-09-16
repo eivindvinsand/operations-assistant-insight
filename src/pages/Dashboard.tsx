@@ -488,33 +488,6 @@ function StepOutput({ step }: { step: RunStep }) {
   )
 }
 
-/** Buckets steps into the handful of things a reader actually wants to compare: initial
- * data load, all reasoning/LLM calls combined, and one bucket per distinct tool (repeat
- * calls to the same tool add up rather than each getting their own bar). Failed steps are
- * shown in their own section instead, so they're excluded here. */
-function groupStepsForChart(steps: RunStep[]): { name: string; duration: number }[] {
-  const buckets = new Map<string, { duration: number; count: number }>()
-  for (const step of steps) {
-    if (step.isError) continue
-    const key =
-      step.type === 'agent' || step.type === 'chat' ? 'Reasoning'
-      : step.type === 'tool' ? step.label
-      : step.type === 'finish' ? 'Finish'
-      : 'Initial data'
-    const entry = buckets.get(key) ?? { duration: 0, count: 0 }
-    entry.duration += step.durationSec
-    entry.count += 1
-    buckets.set(key, entry)
-  }
-  return [...buckets.entries()]
-    .map(([name, { duration, count }]) => ({
-      name: `${name.length > 24 ? name.slice(0, 24) + '…' : name}${count > 1 ? ` (${count}×)` : ''}`,
-      duration: Math.round(duration * 10) / 10,
-    }))
-    .sort((a, b) => b.duration - a.duration)
-    .slice(0, 5)
-}
-
 /** Whether a run actually delivered an answer is the primary signal — `outcome === 'exception'`
  * only means some span in the trace logged a warning/error level line, which can happen on a
  * retried tool call or a transient hiccup that the run recovered from and still produced real
@@ -529,105 +502,30 @@ function runStatusBadge(run: TicketRun): { label: string; state: 'success' | 'al
   return { label: 'Completed', state: 'success' }
 }
 
-/** A run's status line, shown as the always-visible Accordion.Item title so scanning a list of
- * runs for the one that failed doesn't require opening each one. */
-function RunStatusLine({ run }: { run: TicketRun }) {
-  const status = runStatusBadge(run)
+/** Content shown when a message row is expanded — the output plus the step-by-step list.
+ * Each step's own title already flags whether it failed (see `StepTitle`), so a failed tool
+ * call is visible without digging through a separate "failed steps" section. */
+function MessageDetails({ run }: { run: TicketRun }) {
   return (
-    <Inline align="center" gap={8}>
-      <strong>{timeFormatter.format(new Date(run.timestamp))}</strong>
-      <Badge state={status.state}>{status.label}</Badge>
-      <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
-      {run.costUsd > 0 && <span className="bfc-base-2">{preciseCostFormatter.format(run.costUsd)}</span>}
-    </Inline>
-  )
-}
-
-/** Full run detail — output, failed steps, time breakdown, and the step-by-step list — kept
- * collapsed behind the status line by default so opening a row doesn't dump every run's full
- * output and steps on screen at once. */
-function TicketRunDetails({ runs }: { runs: TicketRun[] }) {
-  return (
-    <Grid gap={12} style={{ padding: '4px 0 12px' }}>
-      {runs.map((run) => {
-        const failedSteps = run.steps.filter((s) => s.isError)
-        const hasSteps = run.steps.length > 0
-        const chartData = groupStepsForChart(run.steps)
-        return (
-          <Box key={run.traceId} padding radius border background="base">
-            <Accordion mode="compact">
-              <Accordion.Item title={<RunStatusLine run={run} />}>
-                <div style={{ paddingTop: 12 }}>
-                  {run.solution && (
-                    <Box padding radius background="base-2" style={{ marginBottom: 12 }}>
-                      <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>Output</small>
-                      <Markdown text={run.solution} />
-                    </Box>
-                  )}
-
-                  {failedSteps.length > 0 && (
-                    <Accordion mode="compact" style={{ marginBottom: 12 }}>
-                      <Accordion.Item
-                        title={
-                          <Inline align="center" gap={8}>
-                            <Icon icon={faTriangleExclamation} className="bfc-alert" />
-                            <span className="bfc-alert" style={{ fontWeight: 600 }}>
-                              {failedSteps.length} failed step{failedSteps.length > 1 ? 's' : ''}
-                            </span>
-                          </Inline>
-                        }
-                      >
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                          {failedSteps.map((step, i) => (
-                            <div key={i}>
-                              <Inline align="center" gap={8}>
-                                <span className="bfc-alert" style={{ fontWeight: 600 }}>{step.label}</span>
-                                {step.exceptionType && <Badge state="alert">{step.exceptionType}</Badge>}
-                              </Inline>
-                              {step.exceptionMessage && (
-                                <small className="bfc-alert" style={{ display: 'block', marginTop: 2, wordBreak: 'break-word' }}>
-                                  {step.exceptionMessage}
-                                </small>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </Accordion.Item>
-                    </Accordion>
-                  )}
-
-                  {chartData.length > 0 && (
-                    <Box padding radius background="base-2" style={{ marginBottom: 12 }}>
-                      <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>Time breakdown</small>
-                      <ResponsiveContainer width="100%" height={Math.max(60, chartData.length * 28)}>
-                        <BarChart data={chartData} layout="vertical" margin={{ left: 0, right: 30 }}>
-                          <XAxis type="number" axisLine={false} tickLine={false} tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 10 }} />
-                          <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fill: 'var(--bfc-base-c-2)', fontSize: 10 }} width={140} />
-                          <Tooltip cursor={false} formatter={(v) => [`${v}s`, 'Duration']} contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
-                          <Bar dataKey="duration" name="Duration" fill="var(--bfc-chill)" radius={3} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </Box>
-                  )}
-
-                  {hasSteps ? (
-                    <Accordion mode="compact">
-                      {run.steps.map((step, i) => (
-                        <Accordion.Item key={i} title={<StepTitle index={i} step={step} />}>
-                          <StepOutput step={step} />
-                        </Accordion.Item>
-                      ))}
-                    </Accordion>
-                  ) : (
-                    <small className="bfc-base-2">No steps recorded for this run.</small>
-                  )}
-                </div>
-              </Accordion.Item>
-            </Accordion>
-          </Box>
-        )
-      })}
-    </Grid>
+    <div style={{ padding: '4px 0 12px' }}>
+      {run.solution && (
+        <Box padding radius background="base-2" style={{ marginBottom: 12 }}>
+          <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>Output</small>
+          <Markdown text={run.solution} />
+        </Box>
+      )}
+      {run.steps.length > 0 ? (
+        <Accordion mode="compact">
+          {run.steps.map((step, i) => (
+            <Accordion.Item key={i} title={<StepTitle index={i} step={step} />}>
+              <StepOutput step={step} />
+            </Accordion.Item>
+          ))}
+        </Accordion>
+      ) : (
+        <small className="bfc-base-2">No steps recorded for this message.</small>
+      )}
+    </div>
   )
 }
 
@@ -714,10 +612,11 @@ class ErrorBoundary extends Component<{ children: ReactNode; label: string }, { 
   }
 }
 
-/** Every solution-agent run and chat exchange for this entity, newest first, collapsed to a
- * single status line each — so a failed message can be spotted without scrolling through the
- * full per-run detail below. */
-function ConversationOverview({
+/** Every solution-agent run and chat exchange for this entity, newest first, one row per
+ * message. Status + failed-tool-call count are visible directly in the row so a failure —
+ * whether the reply itself or a tool call inside it — can be spotted without expanding
+ * anything; expanding a row reveals its output and step-by-step detail. */
+function ConversationLogTable({
   solutionRuns,
   chatRuns,
 }: {
@@ -729,29 +628,47 @@ function ConversationOverview({
     ...(chatRuns ?? []).map((run) => ({ run, kind: 'Chat' as const })),
   ].sort((a, b) => new Date(b.run.timestamp).getTime() - new Date(a.run.timestamp).getTime())
 
-  if (combined.length === 0) return null
+  if (combined.length === 0) return <small className="bfc-base-2">No messages recorded.</small>
 
   return (
-    <Box padding radius background="base-2">
-      <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
-        Messages ({combined.length})
-      </small>
-      <Grid gap={4} style={{ maxHeight: 220, overflowY: 'auto' }}>
+    <Table>
+      <Table.Header>
+        <Table.Row>
+          <Table.HeaderCell></Table.HeaderCell>
+          <Table.HeaderCell>Time</Table.HeaderCell>
+          <Table.HeaderCell>Type</Table.HeaderCell>
+          <Table.HeaderCell>Status</Table.HeaderCell>
+          <Table.HeaderCell>Duration</Table.HeaderCell>
+          <Table.HeaderCell>Cost</Table.HeaderCell>
+        </Table.Row>
+      </Table.Header>
+      <Table.Body>
         {combined.map(({ run, kind }) => {
           const status = runStatusBadge(run)
+          const failedSteps = run.steps.filter((s) => s.isError)
           return (
-            <Inline key={run.traceId} align="center" gap={8}>
-              <small className="bfc-base-2" style={{ minWidth: 70 }}>
-                {timeFormatter.format(new Date(run.timestamp))}
-              </small>
-              <Badge state="neutral">{kind}</Badge>
-              <Badge state={status.state}>{status.label}</Badge>
-              <span className="bfc-base-2">{formatDuration(run.durationSec)}</span>
-            </Inline>
+            <Table.Row key={run.traceId} content={<MessageDetails run={run} />}>
+              <Table.Cell>{timeFormatter.format(new Date(run.timestamp))}</Table.Cell>
+              <Table.Cell>
+                <Badge state="neutral">{kind}</Badge>
+              </Table.Cell>
+              <Table.Cell>
+                <Inline align="center" gap={6} style={{ flexWrap: 'wrap' }}>
+                  <Badge state={status.state}>{status.label}</Badge>
+                  {failedSteps.length > 0 && (
+                    <Badge state="alert">
+                      {failedSteps.length} tool call{failedSteps.length > 1 ? 's' : ''} failed
+                    </Badge>
+                  )}
+                </Inline>
+              </Table.Cell>
+              <Table.Cell>{formatDuration(run.durationSec)}</Table.Cell>
+              <Table.Cell>{run.costUsd > 0 ? preciseCostFormatter.format(run.costUsd) : '—'}</Table.Cell>
+            </Table.Row>
           )
         })}
-      </Grid>
-    </Box>
+      </Table.Body>
+    </Table>
   )
 }
 
@@ -772,36 +689,18 @@ function UsageRowDetails({
         </Box>
       )}
 
-      <ConversationOverview solutionRuns={solutionRuns} chatRuns={chatRuns?.items ?? null} />
-
-      {solutionRuns.length > 0 && (
-        <Box>
-          <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
-            Solution agent runs
-          </small>
-          <TicketRunDetails runs={solutionRuns} />
-        </Box>
+      {!chatRuns || chatRuns.loading ? (
+        <Inline align="center" gap={8}>
+          <Icon.Spinner size={16} />
+          <span className="bfc-base-2">Loading chat history …</span>
+        </Inline>
+      ) : chatRuns.error ? (
+        <Message state="alert" noIcon>
+          {chatRuns.error}
+        </Message>
+      ) : (
+        <ConversationLogTable solutionRuns={solutionRuns} chatRuns={chatRuns.items} />
       )}
-
-      <Box>
-        <small className="bfc-base-2" style={{ display: 'block', marginBottom: 8 }}>
-          Chat exchanges
-        </small>
-        {!chatRuns || chatRuns.loading ? (
-          <Inline align="center" gap={8}>
-            <Icon.Spinner size={16} />
-            <span className="bfc-base-2">Loading chat history …</span>
-          </Inline>
-        ) : chatRuns.error ? (
-          <Message state="alert" noIcon>
-            {chatRuns.error}
-          </Message>
-        ) : chatRuns.items && chatRuns.items.length > 0 ? (
-          <TicketRunDetails runs={chatRuns.items} />
-        ) : (
-          <small className="bfc-base-2">No chat exchanges recorded.</small>
-        )}
-      </Box>
     </Grid>
   )
 }
