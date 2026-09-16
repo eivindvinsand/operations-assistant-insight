@@ -23,27 +23,14 @@ const TRACE_ID_RE = /^[0-9a-f]{32}$/i
 /** What actually distinguishes one conversation from another for grouping purposes. A ticket
  * (or other business object) context always wins. Failing that, `chat_id` ties together every
  * turn of a context-less chat — except the very first turn, which the client sends before it
- * knows the chat's id yet (chat_id is null there). For that lone opening message, the best
- * available signal is the next chat_id the same anonymous user is assigned later that same day —
- * i.e. the chat this message almost certainly started. Only falls back to this message's own
- * trace_id (its own single-message row) when even that can't be found, e.g. a first message that
- * was never followed up on. `alias` must be the FROM-clause alias of the outer `records` row this
- * is computed for, since the lookup is a subquery correlated against it. */
-function groupKeySql(alias, env) {
-  return `COALESCE(
-    NULLIF(${alias}.attributes->'context'->>'entity_id', '0'),
-    ${alias}.attributes->>'chat_id',
-    (
-      SELECT nxt.attributes->>'chat_id' FROM records nxt
-      WHERE nxt.span_name = 'chat.request' AND nxt.deployment_environment = '${env}'
-        AND nxt.attributes->>'anon_user_id' = ${alias}.attributes->>'anon_user_id'
-        AND nxt.attributes->>'chat_id' IS NOT NULL
-        AND nxt.start_timestamp >= ${alias}.start_timestamp
-        AND date_trunc('day', nxt.start_timestamp) = date_trunc('day', ${alias}.start_timestamp)
-      ORDER BY nxt.start_timestamp ASC LIMIT 1
-    ),
-    ${alias}.trace_id
-  )`
+ * knows the chat's id yet (chat_id is null there), so that lone first message falls back to its
+ * own trace_id instead of joining any later chat. (A correlated-subquery version that matched
+ * the opening message forward to its eventual chat_id was tried and reverted: Logfire's query
+ * engine rejects it outright — "Physical plan does not support logical expression
+ * ScalarSubquery(<subquery>)" — so every query embedding it 400'd.) `alias` must be the
+ * FROM-clause alias of the outer `records` row this is computed for. */
+function groupKeySql(alias) {
+  return `COALESCE(NULLIF(${alias}.attributes->'context'->>'entity_id', '0'), ${alias}.attributes->>'chat_id', ${alias}.trace_id)`
 }
 
 const ALLOWED_ENVIRONMENTS = new Set(["dev", "local", "prod", "test"])
@@ -705,7 +692,7 @@ app.get("/api/dashboard", async (req, res) => {
             SELECT
               COALESCE(r.attributes->'context'->>'entity_type', 'none') as entity_type,
               r.attributes->'context'->>'entity_id' as entity_id,
-              ${groupKeySql("r", env)} as group_key,
+              ${groupKeySql("r")} as group_key,
               r.trace_id,
               r.attributes->>'model' as model,
               r.attributes->>'reasoning_effort' as reasoning_effort,
@@ -716,7 +703,7 @@ app.get("/api/dashboard", async (req, res) => {
         range,
       ),
       logfireQuery(
-        `SELECT COALESCE(r.attributes->'context'->>'entity_type', 'none') as entity_type, ${groupKeySql("r", env)} as group_key, count(distinct r.trace_id) as error_requests
+        `SELECT COALESCE(r.attributes->'context'->>'entity_type', 'none') as entity_type, ${groupKeySql("r")} as group_key, count(distinct r.trace_id) as error_requests
         FROM records r
         WHERE r.span_name = 'chat.request' AND r.deployment_environment = '${env}'
         AND r.trace_id IN (SELECT DISTINCT trace_id FROM records WHERE level >= 17 AND deployment_environment = '${env}')
@@ -784,7 +771,7 @@ app.get("/api/dashboard", async (req, res) => {
           max(cr.start_timestamp) as last_seen
         FROM (
           SELECT r.trace_id, COALESCE(r.attributes->'context'->>'entity_type', 'none') as entity_type,
-            ${groupKeySql("r", env)} as group_key, r.start_timestamp
+            ${groupKeySql("r")} as group_key, r.start_timestamp
           FROM records r WHERE r.span_name = 'chat.request' AND r.deployment_environment = '${env}'
         ) cr
         LEFT JOIN (${answeredTracesSql(env)}) a ON a.trace_id = cr.trace_id
@@ -1163,7 +1150,7 @@ app.get("/api/usage-runs", async (req, res) => {
     const entityIdFilter = entityId
       ? `attributes->'context'->>'entity_id' = '${entityId}'`
       : groupKey
-        ? `${groupKeySql("records", env)} = '${groupKey}'`
+        ? `${groupKeySql("records")} = '${groupKey}'`
         : `attributes->'context'->>'entity_id' IS NULL`
 
     const requestsResult = await logfireQuery(
@@ -1277,7 +1264,7 @@ app.get("/api/usage-errors", async (req, res) => {
     const entityIdFilter = entityId
       ? `attributes->'context'->>'entity_id' = '${entityId}'`
       : groupKey
-        ? `${groupKeySql("records", env)} = '${groupKey}'`
+        ? `${groupKeySql("records")} = '${groupKey}'`
         : `attributes->'context'->>'entity_id' IS NULL`
 
     const result = await logfireQuery(
