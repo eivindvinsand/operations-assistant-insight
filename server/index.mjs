@@ -23,9 +23,28 @@ const TRACE_ID_RE = /^[0-9a-f]{32}$/i
 /** What actually distinguishes one conversation from another for grouping purposes. A ticket
  * (or other business object) context always wins. Failing that, `chat_id` ties together every
  * turn of a context-less chat — except the very first turn, which the client sends before it
- * knows the chat's id yet (chat_id is null there), so that lone first message falls back to its
- * own trace_id instead of collapsing into one giant "no context" bucket with every other chat. */
-const GROUP_KEY_SQL = `COALESCE(NULLIF(attributes->'context'->>'entity_id', '0'), attributes->>'chat_id', trace_id)`
+ * knows the chat's id yet (chat_id is null there). For that lone opening message, the best
+ * available signal is the next chat_id the same anonymous user is assigned later that same day —
+ * i.e. the chat this message almost certainly started. Only falls back to this message's own
+ * trace_id (its own single-message row) when even that can't be found, e.g. a first message that
+ * was never followed up on. `alias` must be the FROM-clause alias of the outer `records` row this
+ * is computed for, since the lookup is a subquery correlated against it. */
+function groupKeySql(alias, env) {
+  return `COALESCE(
+    NULLIF(${alias}.attributes->'context'->>'entity_id', '0'),
+    ${alias}.attributes->>'chat_id',
+    (
+      SELECT nxt.attributes->>'chat_id' FROM records nxt
+      WHERE nxt.span_name = 'chat.request' AND nxt.deployment_environment = '${env}'
+        AND nxt.attributes->>'anon_user_id' = ${alias}.attributes->>'anon_user_id'
+        AND nxt.attributes->>'chat_id' IS NOT NULL
+        AND nxt.start_timestamp >= ${alias}.start_timestamp
+        AND date_trunc('day', nxt.start_timestamp) = date_trunc('day', ${alias}.start_timestamp)
+      ORDER BY nxt.start_timestamp ASC LIMIT 1
+    ),
+    ${alias}.trace_id
+  )`
+}
 
 const ALLOWED_ENVIRONMENTS = new Set(["dev", "local", "prod", "test"])
 const DEFAULT_ENVIRONMENT = "prod"
@@ -414,8 +433,10 @@ async function computeConfidenceForGroups(env, groupsMap) {
     const counts = { high: 0, medium: 0, low: 0, unknown: 0 }
     for (const traceId of traceIds) {
       const steps = stepsByTrace.get(traceId) ?? []
-      const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
-      const solution = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1].output : null
+      // Same "any step with output, not just the last one" rule as hasNoAnswer elsewhere — a
+      // trailing empty turn must not hide an earlier real answer's confidence.
+      const outputSteps = steps.filter((s) => (s.type === "agent" || s.type === "chat") && s.output)
+      const solution = outputSteps.length > 0 ? outputSteps[outputSteps.length - 1].output : null
       counts[parseConfidence(solution) ?? "unknown"] += 1
     }
     const sampledRuns = traceIds.length
@@ -676,25 +697,29 @@ app.get("/api/dashboard", async (req, res) => {
       logfireQuery(
         `SELECT entity_type, entity_id, group_key, trace_id, n, last_seen, model, reasoning_effort FROM (
           SELECT
-            COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
-            attributes->'context'->>'entity_id' as entity_id,
-            ${GROUP_KEY_SQL} as group_key,
-            trace_id,
-            attributes->>'model' as model,
-            attributes->>'reasoning_effort' as reasoning_effort,
-            start_timestamp,
-            COUNT(*) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), ${GROUP_KEY_SQL}) as n,
-            MAX(start_timestamp) OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), ${GROUP_KEY_SQL}) as last_seen,
-            ROW_NUMBER() OVER (PARTITION BY COALESCE(attributes->'context'->>'entity_type', 'none'), ${GROUP_KEY_SQL} ORDER BY start_timestamp DESC) as rn
-          FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
+            entity_type, entity_id, group_key, trace_id, model, reasoning_effort, start_timestamp,
+            COUNT(*) OVER (PARTITION BY entity_type, group_key) as n,
+            MAX(start_timestamp) OVER (PARTITION BY entity_type, group_key) as last_seen,
+            ROW_NUMBER() OVER (PARTITION BY entity_type, group_key ORDER BY start_timestamp DESC) as rn
+          FROM (
+            SELECT
+              COALESCE(r.attributes->'context'->>'entity_type', 'none') as entity_type,
+              r.attributes->'context'->>'entity_id' as entity_id,
+              ${groupKeySql("r", env)} as group_key,
+              r.trace_id,
+              r.attributes->>'model' as model,
+              r.attributes->>'reasoning_effort' as reasoning_effort,
+              r.start_timestamp
+            FROM records r WHERE r.span_name = 'chat.request' AND r.deployment_environment = '${env}'
+          ) base
         ) WHERE rn = 1 ORDER BY last_seen DESC LIMIT 1000`,
         range,
       ),
       logfireQuery(
-        `SELECT COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type, ${GROUP_KEY_SQL} as group_key, count(distinct trace_id) as error_requests
-        FROM records
-        WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
-        AND trace_id IN (SELECT DISTINCT trace_id FROM records WHERE level >= 17 AND deployment_environment = '${env}')
+        `SELECT COALESCE(r.attributes->'context'->>'entity_type', 'none') as entity_type, ${groupKeySql("r", env)} as group_key, count(distinct r.trace_id) as error_requests
+        FROM records r
+        WHERE r.span_name = 'chat.request' AND r.deployment_environment = '${env}'
+        AND r.trace_id IN (SELECT DISTINCT trace_id FROM records WHERE level >= 17 AND deployment_environment = '${env}')
         GROUP BY 1, 2`,
         range,
       ),
@@ -758,9 +783,9 @@ app.get("/api/dashboard", async (req, res) => {
           count(DISTINCT CASE WHEN a.trace_id IS NULL THEN cr.trace_id END) as failed,
           max(cr.start_timestamp) as last_seen
         FROM (
-          SELECT trace_id, COALESCE(attributes->'context'->>'entity_type', 'none') as entity_type,
-            ${GROUP_KEY_SQL} as group_key, start_timestamp
-          FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}'
+          SELECT r.trace_id, COALESCE(r.attributes->'context'->>'entity_type', 'none') as entity_type,
+            ${groupKeySql("r", env)} as group_key, r.start_timestamp
+          FROM records r WHERE r.span_name = 'chat.request' AND r.deployment_environment = '${env}'
         ) cr
         LEFT JOIN (${answeredTracesSql(env)}) a ON a.trace_id = cr.trace_id
         GROUP BY 1, 2 ORDER BY last_seen DESC LIMIT 1000`,
@@ -1129,17 +1154,17 @@ app.get("/api/usage-runs", async (req, res) => {
     const groupKey = groupKeyRaw ? String(groupKeyRaw).replace(/'/g, "''") : null
     const range = resolveTimeRange(req)
 
-    // A real entity id scopes to that ticket/article as before. Without one, the row's groupKey
-    // is either a chat_id (most turns) or a trace_id (a chat's first turn, before it has a
-    // chat_id) — see GROUP_KEY_SQL. Falling back to "entity_id IS NULL" only when neither is
-    // given keeps this endpoint working for stale/bookmarked links from before groupKey existed.
+    // A real entity id scopes to that ticket/article as before. Without one, matching on the same
+    // groupKeySql expression the row's groupKey was computed from (rather than a plain chat_id
+    // equality) is what's needed to also pull in that conversation's opening message — its own
+    // chat_id attribute is still null; only its *computed* group key resolves to this chat_id.
+    // Falling back to "entity_id IS NULL" only when no groupKey is given keeps this endpoint
+    // working for stale/bookmarked links from before groupKey existed.
     const entityIdFilter = entityId
       ? `attributes->'context'->>'entity_id' = '${entityId}'`
-      : groupKey && TRACE_ID_RE.test(groupKey)
-        ? `trace_id = '${groupKey}'`
-        : groupKey
-          ? `attributes->>'chat_id' = '${groupKey}'`
-          : `attributes->'context'->>'entity_id' IS NULL`
+      : groupKey
+        ? `${groupKeySql("records", env)} = '${groupKey}'`
+        : `attributes->'context'->>'entity_id' IS NULL`
 
     const requestsResult = await logfireQuery(
       `SELECT trace_id, start_timestamp, duration FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}' AND COALESCE(attributes->'context'->>'entity_type', 'none') = '${entityType}' AND ${entityIdFilter} ORDER BY start_timestamp DESC LIMIT 1000`,
@@ -1251,11 +1276,9 @@ app.get("/api/usage-errors", async (req, res) => {
 
     const entityIdFilter = entityId
       ? `attributes->'context'->>'entity_id' = '${entityId}'`
-      : groupKey && TRACE_ID_RE.test(groupKey)
-        ? `trace_id = '${groupKey}'`
-        : groupKey
-          ? `attributes->>'chat_id' = '${groupKey}'`
-          : `attributes->'context'->>'entity_id' IS NULL`
+      : groupKey
+        ? `${groupKeySql("records", env)} = '${groupKey}'`
+        : `attributes->'context'->>'entity_id' IS NULL`
 
     const result = await logfireQuery(
       `SELECT start_timestamp, message, exception_message, exception_type, span_name FROM records
@@ -1430,8 +1453,10 @@ app.get("/api/solution-agent/groups/:dimension/detail", async (req, res) => {
 
     for (const traceId of sampleTraceIds) {
       const steps = stepsByTrace.get(traceId) ?? []
-      const contentSteps = steps.filter((s) => s.type === "agent" || s.type === "chat")
-      const solution = contentSteps.length > 0 ? contentSteps[contentSteps.length - 1].output : null
+      // Same "any step with output, not just the last one" rule as hasNoAnswer elsewhere — a
+      // trailing empty turn must not hide an earlier real answer's confidence/sources/tools.
+      const outputSteps = steps.filter((s) => (s.type === "agent" || s.type === "chat") && s.output)
+      const solution = outputSteps.length > 0 ? outputSteps[outputSteps.length - 1].output : null
 
       const confidence = parseConfidence(solution)
       confidenceCounts[confidence ?? "unknown"] += 1
