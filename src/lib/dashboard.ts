@@ -37,6 +37,9 @@ export interface TicketRun {
   costUsd: number
   failureReason: string | null
   hasNoAnswer: boolean
+  /** No answer yet, but the request is young enough that its agent run may still be in flight —
+   * distinct from a genuine failure. */
+  pending: boolean
 }
 
 export interface DashboardData {
@@ -53,6 +56,9 @@ export interface DashboardData {
      * top rows shown in the conversation-log table. */
     noAnswerCount: number
     noAnswerPercent: number
+    /** Requests too young to have a genuine answer/exception yet — likely still mid-flight,
+     * excluded from noAnswerCount. */
+    pendingCount: number
     totalRequests: number
   }
   context: { type: string; count: number }[]
@@ -88,6 +94,8 @@ export interface DashboardData {
     errorCount: number
     /** Count of this entity's `uses` requests that got an empty last chat message. */
     noAnswerCount: number
+    /** Count of this entity's `uses` requests too young to have a genuine answer yet. */
+    pendingCount: number
     runs: TicketRun[]
   }[]
   dailyCost: { day: string; cost: number; cumulativeCost: number }[]

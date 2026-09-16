@@ -63,6 +63,15 @@ function sqlList(values) {
 
 const SKIPPED_SPANS = new Set(["POST /api/v2/chat", "OPTIONS /api/v2/chat", "chat.request"])
 
+// A run's real answer can take a couple of minutes to land after its chat.request span starts
+// (multi-step agent + tool calls), so a request younger than this with no answer/exception yet is
+// still probably mid-flight — not a genuine failure — and should show as pending instead.
+const PENDING_GRACE_MINUTES = 5
+
+function pendingCutoffIso() {
+  return new Date(Date.now() - PENDING_GRACE_MINUTES * 60 * 1000).toISOString()
+}
+
 /** A trace's answer is whether ANY of its chat/agent-reasoning spans produced real content —
  * not just its last one. A trailing empty turn (the model finishing with nothing further to add
  * after already answering) must not overrule an earlier turn that had real output; that's exactly
@@ -614,6 +623,7 @@ app.get("/api/dashboard", async (req, res) => {
   try {
     const env = resolveEnv(req)
     const range = resolveTimeRange(req)
+    const pendingCutoff = pendingCutoffIso()
     const [
       responseTimeResult,
       tokensCostResult,
@@ -767,7 +777,8 @@ app.get("/api/dashboard", async (req, res) => {
       logfireQuery(
         `SELECT entity_type, group_key,
           count(DISTINCT cr.trace_id) as total,
-          count(DISTINCT CASE WHEN a.trace_id IS NULL THEN cr.trace_id END) as failed,
+          count(DISTINCT CASE WHEN a.trace_id IS NULL AND cr.start_timestamp < '${pendingCutoff}' THEN cr.trace_id END) as failed,
+          count(DISTINCT CASE WHEN a.trace_id IS NULL AND cr.start_timestamp >= '${pendingCutoff}' THEN cr.trace_id END) as pending,
           max(cr.start_timestamp) as last_seen
         FROM (
           SELECT r.trace_id, COALESCE(r.attributes->'context'->>'entity_type', 'none') as entity_type,
@@ -782,10 +793,14 @@ app.get("/api/dashboard", async (req, res) => {
       // chat.request trace in range, so it isn't capped by however many distinct entities exist
       // (unlike a per-entity GROUP BY, which the query API's 1000-row response ceiling could
       // still truncate) and so it uses the exact same request-level definition as the trend chart.
+      // Requests younger than PENDING_GRACE_MINUTES with no answer yet are still probably mid-flight
+      // (a full agent run can take a couple of minutes), so they're split out as "pending" instead
+      // of counted as failed.
       logfireQuery(
         `SELECT count(DISTINCT cr.trace_id) as total,
-          count(DISTINCT CASE WHEN a.trace_id IS NULL THEN cr.trace_id END) as failed
-        FROM (SELECT trace_id FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}') cr
+          count(DISTINCT CASE WHEN a.trace_id IS NULL AND cr.start_timestamp < '${pendingCutoff}' THEN cr.trace_id END) as failed,
+          count(DISTINCT CASE WHEN a.trace_id IS NULL AND cr.start_timestamp >= '${pendingCutoff}' THEN cr.trace_id END) as pending
+        FROM (SELECT trace_id, start_timestamp FROM records WHERE span_name = 'chat.request' AND deployment_environment = '${env}') cr
         LEFT JOIN (${answeredTracesSql(env)}) a ON a.trace_id = cr.trace_id`,
         range,
       ),
@@ -812,13 +827,15 @@ app.get("/api/dashboard", async (req, res) => {
       entityAnswerStats.set(`${row.entity_type}-${row.group_key}`, {
         total: Number(row.total ?? 0),
         failed: Number(row.failed ?? 0),
+        pending: Number(row.pending ?? 0),
       })
     }
 
     // Headline failed-responses rate: every chat.request in range, not just each entity's latest
     // one, so it reflects the same request-level definition as the trend chart below it.
-    const chatTotals = chatAnswerTotalsResult.data[0] ?? { total: 0, failed: 0 }
+    const chatTotals = chatAnswerTotalsResult.data[0] ?? { total: 0, failed: 0, pending: 0 }
     const noAnswerCount = Number(chatTotals.failed ?? 0)
+    const pendingCount = Number(chatTotals.pending ?? 0)
     const totalRequests = Number(chatTotals.total ?? 0)
     const noAnswerPercent = totalRequests > 0 ? (noAnswerCount / totalRequests) * 100 : 0
 
@@ -851,6 +868,9 @@ app.get("/api/dashboard", async (req, res) => {
             costUsd: null,
             failureReason: null,
             hasNoAnswer: false,
+            // solution_agent_finished only exists once a run has actually finished, so this run
+            // is never mid-flight.
+            pending: false,
           }
         }
         const agentSteps = steps.filter((s) => s.type === "agent" && s.output)
@@ -868,6 +888,7 @@ app.get("/api/dashboard", async (req, res) => {
           failureReason: failedStep?.label ?? null,
           // An empty trailing turn after the real answer must not overrule the answer itself.
           hasNoAnswer: !solution,
+          pending: false,
         }
       })
       const knownCosts = runs.filter((r) => r.costUsd != null)
@@ -909,6 +930,7 @@ app.get("/api/dashboard", async (req, res) => {
         uses: Number(usageTodayRow.uses ?? 0),
         noAnswerCount,
         noAnswerPercent,
+        pendingCount,
         totalRequests,
       },
       context: contextResult.data.map((row) => ({ type: row.entity_type, count: Number(row.n ?? 0) })),
@@ -995,6 +1017,7 @@ app.get("/api/dashboard", async (req, res) => {
           exceptions: solution?.exceptions ?? 0,
           errorCount: errorCountByEntity.get(`${entityType}-${groupKey}`) ?? 0,
           noAnswerCount: entityAnswerStats.get(`${entityType}-${groupKey}`)?.failed ?? 0,
+          pendingCount: entityAnswerStats.get(`${entityType}-${groupKey}`)?.pending ?? 0,
           runs: solution?.runs ?? [],
         }
       }),
@@ -1140,6 +1163,7 @@ app.get("/api/usage-runs", async (req, res) => {
     const groupKeyRaw = req.query.groupKey
     const groupKey = groupKeyRaw ? String(groupKeyRaw).replace(/'/g, "''") : null
     const range = resolveTimeRange(req)
+    const pendingCutoff = new Date(pendingCutoffIso()).getTime()
 
     // A real entity id scopes to that ticket/article as before. Without one, matching on the same
     // groupKeySql expression the row's groupKey was computed from (rather than a plain chat_id
@@ -1167,11 +1191,16 @@ app.get("/api/usage-runs", async (req, res) => {
       const solution = outputSteps.length > 0 ? outputSteps[outputSteps.length - 1].output : null
       const costUsd = steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0)
       const failedStep = steps.find((s) => s.isError)
+      const isException = exceptionTraces.has(row.trace_id)
+      // A run this young with no answer and no exception yet is still probably mid-flight (a full
+      // agent run can take a couple of minutes to produce its final answer) rather than a genuine
+      // failure — see PENDING_GRACE_MINUTES.
+      const pending = !solution && !isException && new Date(row.start_timestamp).getTime() >= pendingCutoff
 
       return {
         traceId: row.trace_id,
         timestamp: row.start_timestamp,
-        outcome: exceptionTraces.has(row.trace_id) ? "exception" : "completed",
+        outcome: isException ? "exception" : "completed",
         durationSec: row.duration ?? 0,
         steps,
         solution,
@@ -1180,7 +1209,8 @@ app.get("/api/usage-runs", async (req, res) => {
         // Same steps `solution` is drawn from — an empty trailing turn (the model saying
         // nothing further after the real answer) must not overrule the answer that's already
         // there just because it happened to run last.
-        hasNoAnswer: !solution,
+        hasNoAnswer: !solution && !pending,
+        pending,
       }
     })
 
@@ -1204,8 +1234,13 @@ app.get("/api/no-answer", async (req, res) => {
     const traceIds = requestsResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
     const answeredResult = await logfireQuery(answeredTracesSql(env, traceIds), range)
     const answeredTraces = new Set(answeredResult.data.map((r) => r.trace_id))
+    const pendingCutoff = new Date(pendingCutoffIso()).getTime()
 
-    const noAnswerRows = requestsResult.data.filter((row) => !answeredTraces.has(row.trace_id))
+    // Requests still young enough that their agent run may not have finished yet are left out —
+    // they're pending, not failed (see PENDING_GRACE_MINUTES).
+    const noAnswerRows = requestsResult.data.filter(
+      (row) => !answeredTraces.has(row.trace_id) && new Date(row.start_timestamp).getTime() < pendingCutoff,
+    )
 
     const { stepsByTrace, exceptionTraces } = await fetchStepsByTrace(
       noAnswerRows.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id)),

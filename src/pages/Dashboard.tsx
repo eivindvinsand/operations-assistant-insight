@@ -492,7 +492,10 @@ function StepOutput({ step }: { step: RunStep }) {
  * only means some span in the trace logged a warning/error level line, which can happen on a
  * retried tool call or a transient hiccup that the run recovered from and still produced real
  * output for. Only demote to a hard failure when there's genuinely no answer to show. */
-function runStatusBadge(run: TicketRun): { label: string; state: 'success' | 'alert' | 'warning' } {
+function runStatusBadge(run: TicketRun): { label: string; state: 'success' | 'alert' | 'warning' | 'neutral' } {
+  if (run.pending) {
+    return { label: 'Running …', state: 'neutral' }
+  }
   if (run.hasNoAnswer) {
     return { label: run.outcome === 'exception' ? 'Failed' : 'Empty response', state: 'alert' }
   }
@@ -1344,6 +1347,7 @@ function Dashboard() {
               icon={faTriangleExclamation}
               value={`${data.totals.noAnswerPercent.toFixed(1)}%`}
               alert={data.totals.noAnswerPercent > 0}
+              sub={data.totals.pendingCount > 0 ? `${data.totals.pendingCount} still running` : undefined}
               onClick={() => openNoAnswerModal()}
             />
           </Grid>
@@ -1526,11 +1530,18 @@ function Dashboard() {
                           {row.costUsd != null ? preciseCostFormatter.format(row.costUsd) : '—'}
                         </Table.Cell>
                         <Table.Cell>
-                          <span title={`${row.noAnswerCount} of ${row.uses} requests got an empty response`}>
-                            <Badge state={row.noAnswerCount > 0 ? 'alert' : 'success'}>
-                              {row.noAnswerCount}/{row.uses}
-                            </Badge>
-                          </span>
+                          <Inline align="center" gap={6} style={{ flexWrap: 'wrap' }}>
+                            <span title={`${row.noAnswerCount} of ${row.uses} requests got an empty response`}>
+                              <Badge state={row.noAnswerCount > 0 ? 'alert' : 'success'}>
+                                {row.noAnswerCount}/{row.uses}
+                              </Badge>
+                            </span>
+                            {row.pendingCount > 0 && (
+                              <span title={`${row.pendingCount} request(s) still running — not counted as failed yet`}>
+                                <Badge state="neutral">{row.pendingCount} running</Badge>
+                              </span>
+                            )}
+                          </Inline>
                         </Table.Cell>
                         <Table.Cell>
                           {row.errorCount > 0 ? (
