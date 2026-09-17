@@ -168,6 +168,29 @@ function classifyStep(row) {
   }
 }
 
+/** Picks the unclaimed `execute_tool` call in `candidates` whose server-qualified name ends with
+ * the FastMCP step's bare tool name (e.g. `workplace_manager_get_client` for `get_client`) and
+ * which started closest in time to `timestamp`, then marks it claimed so a second call to the
+ * same tool in the same trace doesn't get matched twice. There's no shared call id between the
+ * two span kinds, so this proximity match is best-effort, not exact. */
+function matchToolCallInput(candidates, toolName, timestamp) {
+  if (!candidates) return null
+  const target = new Date(timestamp).getTime()
+  let best = null
+  let bestDiff = Infinity
+  for (const candidate of candidates) {
+    if (candidate.used || !candidate.name.endsWith(toolName)) continue
+    const diff = Math.abs(new Date(candidate.time).getTime() - target)
+    if (diff < bestDiff) {
+      best = candidate
+      bestDiff = diff
+    }
+  }
+  if (!best) return null
+  best.used = true
+  return JSON.stringify(best.args, null, 2)
+}
+
 /** Fetches every span in the given traces and classifies each into a step, grouped by trace_id.
  * Also returns the set of traces containing an error/warning-level span. */
 async function fetchStepsByTrace(traceIds, insights) {
@@ -179,14 +202,32 @@ async function fetchStepsByTrace(traceIds, insights) {
     `SELECT trace_id, start_timestamp, duration, span_name, message, level, attributes, exception_message, exception_type FROM records WHERE trace_id IN (${traceList}) ORDER BY start_timestamp`,
     insights,
   )
+  // pydantic-ai's `execute_tool <server>_<tool>` span is the only place a call's actual arguments
+  // land (attribute `gen_ai.tool.call.arguments`) — the FastMCP `tools/call <tool>` span the step
+  // list is otherwise built from never gets a payload attached, only protocol/session metadata.
+  // Collected up front so each tool step below can claim its match via matchToolCallInput, and the
+  // execute_tool row itself is skipped rather than rendered as its own redundant step.
+  const executeToolCallsByTrace = new Map()
+  for (const row of result.data) {
+    if (!row.span_name.startsWith("execute_tool ")) continue
+    const args = row.attributes?.["gen_ai.tool.call.arguments"]
+    if (args === undefined) continue
+    if (!executeToolCallsByTrace.has(row.trace_id)) executeToolCallsByTrace.set(row.trace_id, [])
+    executeToolCallsByTrace.get(row.trace_id).push({ name: row.span_name.slice(13), time: row.start_timestamp, args, used: false })
+  }
   for (const row of result.data) {
     if (row.level >= 17) exceptionTraces.add(row.trace_id)
-    if (SKIPPED_SPANS.has(row.span_name)) continue
+    if (SKIPPED_SPANS.has(row.span_name) || row.span_name.startsWith("execute_tool ")) continue
     if (!stepsByTrace.has(row.trace_id)) stepsByTrace.set(row.trace_id, [])
     const classified = classifyStep(row)
+    const input =
+      classified.type === "tool"
+        ? matchToolCallInput(executeToolCallsByTrace.get(row.trace_id), classified.label, row.start_timestamp)
+        : null
     stepsByTrace.get(row.trace_id).push({
       costUsd: null,
       ...classified,
+      input,
       exceptionMessage: row.exception_message ?? null,
       exceptionType: row.exception_type ?? null,
       startedAt: row.start_timestamp,
@@ -217,6 +258,36 @@ async function fetchTraceContext(traceIds, range) {
     }
   }
   return { modelByTrace, ticketByTrace }
+}
+
+/** Looks up the arguments a tool was actually invoked with, from pydantic-ai's `execute_tool
+ * <tool>` span attribute `gen_ai.tool.call.arguments`. A failure log record carries no span id to
+ * join on directly, so results are grouped by trace and returned in time order; the caller picks
+ * the call at-or-immediately-before the failure's own timestamp as the best-effort match. */
+async function fetchToolCallInputs(traceIds, tool, env, range) {
+  const callsByTrace = new Map()
+  const validIds = traceIds.filter((id) => TRACE_ID_RE.test(id))
+  if (validIds.length === 0) return callsByTrace
+  const result = await logfireQuery(
+    `SELECT trace_id, start_timestamp, attributes->'gen_ai.tool.call.arguments' as args FROM records WHERE deployment_environment = '${env}' AND span_name = 'execute_tool ${tool}' AND trace_id IN (${sqlList(validIds)}) ORDER BY start_timestamp`,
+    range,
+  )
+  for (const row of result.data) {
+    if (!callsByTrace.has(row.trace_id)) callsByTrace.set(row.trace_id, [])
+    callsByTrace.get(row.trace_id).push({ time: row.start_timestamp, args: row.args })
+  }
+  return callsByTrace
+}
+
+/** Picks the latest of a trace's tool-call argument sets that started at or before `timestamp`. */
+function latestArgsAtOrBefore(calls, timestamp) {
+  const cutoff = new Date(timestamp).getTime()
+  let best = null
+  for (const call of calls ?? []) {
+    const t = new Date(call.time).getTime()
+    if (t <= cutoff && (!best || t > new Date(best.time).getTime())) best = call
+  }
+  return best?.args ?? null
 }
 
 const UNKNOWN_GROUP = "Ukjent"
@@ -1105,18 +1176,23 @@ app.get("/api/tool-failures/:tool", async (req, res) => {
       `SELECT trace_id, start_timestamp, attributes->>'logfire.msg_template' as template, attributes->'logfire.logging_args'->>${detailArgIndex} as detail FROM records WHERE level >= 17 AND deployment_environment = '${env}' AND attributes->>'logfire.msg_template' IN (${templateList}) AND attributes->'logfire.logging_args'->>${toolArgIndex} = '${tool}' ORDER BY start_timestamp DESC LIMIT 15`,
       range,
     )
-    const { modelByTrace, ticketByTrace } = await fetchTraceContext(
-      result.data.map((row) => row.trace_id),
-      range,
-    )
+    const traceIds = result.data.map((row) => row.trace_id)
+    const [{ modelByTrace, ticketByTrace }, inputsByTrace] = await Promise.all([
+      fetchTraceContext(traceIds, range),
+      fetchToolCallInputs(traceIds, tool, env, range),
+    ])
     res.json({
-      examples: result.data.map((row) => ({
-        time: row.start_timestamp,
-        kind: row.template?.includes("timed out") ? "timeout" : "exception",
-        detail: row.template?.includes("timed out") ? `Timed out after ${row.detail}s` : row.detail ?? "",
-        model: modelByTrace.get(row.trace_id) ?? null,
-        ticketId: ticketByTrace.get(row.trace_id) ?? null,
-      })),
+      examples: result.data.map((row) => {
+        const args = latestArgsAtOrBefore(inputsByTrace.get(row.trace_id), row.start_timestamp)
+        return {
+          time: row.start_timestamp,
+          kind: row.template?.includes("timed out") ? "timeout" : "exception",
+          detail: row.template?.includes("timed out") ? `Timed out after ${row.detail}s` : row.detail ?? "",
+          model: modelByTrace.get(row.trace_id) ?? null,
+          ticketId: ticketByTrace.get(row.trace_id) ?? null,
+          input: args ? JSON.stringify(args, null, 2) : null,
+        }
+      }),
     })
   } catch (e) {
     console.error("[logfire] tool failure examples query failed:", e.message)

@@ -20,6 +20,10 @@ export interface RunStep {
   type: StepType
   label: string
   output: string | null
+  /** For `tool` steps: the call's arguments, pretty-printed JSON, matched in from the sibling
+   * pydantic-ai `execute_tool` span by tool name + timing (best-effort — there's no shared call
+   * id between the two spans). Null when no match was found or the step isn't a tool call. */
+  input: string | null
   startedAt: string
   durationSec: number
   isError: boolean
@@ -181,6 +185,10 @@ export interface ToolFailureExample {
   detail: string
   model: string | null
   ticketId: string | null
+  /** The tool call's arguments, pretty-printed JSON, when Logfire captured a matching call in the
+   * same trace; null when no match was found (e.g. direct/background tool calls, which bypass the
+   * agent span this is matched against). */
+  input: string | null
 }
 
 export async function fetchToolFailureExamples(

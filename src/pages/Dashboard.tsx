@@ -469,15 +469,26 @@ function StepOutput({ step }: { step: RunStep }) {
           </Inline>
         </Box>
       )}
+      {step.type === 'tool' && step.input && (
+        <div>
+          <small className="bfc-base-2" style={{ display: 'block', marginBottom: 4 }}>Input</small>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>{step.input}</pre>
+        </div>
+      )}
       {step.output ? (
-        step.type === 'agent' || step.type === 'chat' ? (
-          <Markdown text={step.output} />
-        ) : step.type === 'tool' ? (
-          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>{step.output}</pre>
-        ) : (
-          <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{step.output}</p>
-        )
-      ) : !step.isError ? (
+        <div>
+          {step.type === 'tool' && (
+            <small className="bfc-base-2" style={{ display: 'block', marginBottom: 4 }}>Output</small>
+          )}
+          {step.type === 'agent' || step.type === 'chat' ? (
+            <Markdown text={step.output} />
+          ) : step.type === 'tool' ? (
+            <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12 }}>{step.output}</pre>
+          ) : (
+            <p style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{step.output}</p>
+          )}
+        </div>
+      ) : !step.isError && !step.input ? (
         <small className="bfc-base-2">
           {step.type === 'tool'
             ? 'No input/output was captured for this tool call — Logfire only recorded that it ran.'
@@ -1631,7 +1642,7 @@ function Dashboard() {
         isOpen={toolFailureModal != null}
         onRequestClose={() => setToolFailureModal(null)}
         header={toolFailureModal?.title}
-        width={800}
+        width={1400}
       >
         {toolFailureModal?.loading && (
           <Inline align="center" gap={8}>
@@ -1648,11 +1659,12 @@ function Dashboard() {
           <Table>
             <Table.Header>
               <Table.Row>
-                <Table.HeaderCell>Time</Table.HeaderCell>
-                <Table.HeaderCell>Kind</Table.HeaderCell>
-                <Table.HeaderCell>Model</Table.HeaderCell>
-                <Table.HeaderCell>Ticket</Table.HeaderCell>
-                <Table.HeaderCell>Detail</Table.HeaderCell>
+                <Table.HeaderCell style={{ width: 150 }}>Time</Table.HeaderCell>
+                <Table.HeaderCell style={{ width: 90 }}>Kind</Table.HeaderCell>
+                <Table.HeaderCell style={{ width: 100 }}>Model</Table.HeaderCell>
+                <Table.HeaderCell style={{ width: 90 }}>Ticket</Table.HeaderCell>
+                <Table.HeaderCell style={{ width: 280 }}>Detail</Table.HeaderCell>
+                <Table.HeaderCell>Input</Table.HeaderCell>
               </Table.Row>
             </Table.Header>
             <Table.Body>
@@ -1660,7 +1672,7 @@ function Dashboard() {
                 const link = entityLink('ticket', t.ticketId)
                 return (
                   <Table.Row key={i}>
-                    <Table.Cell>{timeFormatter.format(new Date(t.time))}</Table.Cell>
+                    <Table.Cell style={{ whiteSpace: 'nowrap' }}>{timeFormatter.format(new Date(t.time))}</Table.Cell>
                     <Table.Cell>
                       <Badge state={t.kind === 'timeout' ? 'warning' : 'alert'}>{t.kind}</Badge>
                     </Table.Cell>
@@ -1675,6 +1687,24 @@ function Dashboard() {
                       )}
                     </Table.Cell>
                     <Table.Cell style={{ wordBreak: 'break-word' }}>{t.detail}</Table.Cell>
+                    <Table.Cell style={{ verticalAlign: 'top' }}>
+                      {t.input ? (
+                        <pre
+                          style={{
+                            margin: 0,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            fontSize: 12,
+                            maxHeight: 220,
+                            overflow: 'auto',
+                          }}
+                        >
+                          {t.input}
+                        </pre>
+                      ) : (
+                        '—'
+                      )}
+                    </Table.Cell>
                   </Table.Row>
                 )
               })}
