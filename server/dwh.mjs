@@ -30,7 +30,12 @@ async function getPool() {
       password: process.env.DWH_PASSWORD ?? "",
       database: "dwh",
       options: { encrypt: false, trustServerCertificate: true },
-      requestTimeout: 15000,
+      // The solution-agent cluster rollup runs a CTE with a window function over a large
+      // literal exclusion list against a 5-year ticket table - the default 15s is routinely
+      // too tight for that one, even though every other query here finishes in well under a
+      // second. There's no per-query override in this driver, so this is the floor for all of
+      // them.
+      requestTimeout: 60000,
       pool: { max: 5, min: 0, idleTimeoutMillis: 30000 },
     })
     newPool.on("error", () => {

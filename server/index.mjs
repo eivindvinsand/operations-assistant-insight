@@ -302,6 +302,29 @@ const SOLUTION_LOOKBACK_MONTHS = 24
 // cap used for the main dashboard's per-ticket solution view).
 const SOLUTION_SAMPLE_RUN_LIMIT = 50
 
+// Unlike the rest of this dashboard (live telemetry, deliberately never cached - see the
+// Cache-Control middleware above), the solution-agent view is a DWH-backed rollup: a slow-changing
+// historical extract, expensive enough to aggregate (chunked DWH batches plus a 24-month Logfire
+// scan) that it can outrun even the driver's request timeout on a cold cache. Short-lived caching
+// means a page reload doesn't re-run the whole aggregation from scratch every time.
+const SOLUTION_CACHE_TTL_MS = 15 * 60 * 1000
+const solutionCache = new Map()
+
+/** Runs `compute` once per `key` within SOLUTION_CACHE_TTL_MS, sharing the same in-flight promise
+ * across concurrent callers so a cold cache doesn't trigger the same expensive query twice. A
+ * rejected compute is evicted immediately so the next call retries instead of caching the failure. */
+function cachedSolutionData(key, compute) {
+  const now = Date.now()
+  const entry = solutionCache.get(key)
+  if (entry && entry.expiresAt > now) return entry.promise
+  const promise = compute().catch((err) => {
+    solutionCache.delete(key)
+    throw err
+  })
+  solutionCache.set(key, { expiresAt: now + SOLUTION_CACHE_TTL_MS, promise })
+  return promise
+}
+
 function monthlyLookbackRanges(months) {
   const ranges = []
   const now = new Date()
@@ -386,7 +409,11 @@ async function fetchClusterIdByReference(referenceNumbers) {
 
 /** One row per ticket the solution agent has ever run against, with its DWH category/product/
  * company/cluster (falling back to "Ukjent" when the ticket isn't found in the DWH extract). */
-async function buildSolutionAgentTickets(env) {
+function buildSolutionAgentTickets(env) {
+  return cachedSolutionData(`tickets:${env}`, () => buildSolutionAgentTicketsUncached(env))
+}
+
+async function buildSolutionAgentTicketsUncached(env) {
   const byTicket = await fetchAllSolutionRunsByTicket(env)
   const referenceNumbers = [...byTicket.keys()]
   const [metaByRef, clusterByRef] = await Promise.all([
@@ -1456,20 +1483,23 @@ app.get("/api/day-log", async (req, res) => {
 app.get("/api/solution-agent/groups", async (req, res) => {
   try {
     const env = resolveEnv(req)
-    const tickets = await buildSolutionAgentTickets(env)
-    const byClusterRaw = groupTicketsBy(tickets, "clusterId")
-    const byCluster = await enrichClusterGroups(
-      byClusterRaw,
-      tickets.map((t) => t.reference),
-    )
-    res.json({
-      totals: { tickets: tickets.length, runs: tickets.reduce((sum, t) => sum + t.runs, 0) },
-      lookbackMonths: SOLUTION_LOOKBACK_MONTHS,
-      byCategory: groupTicketsBy(tickets, "category"),
-      byProduct: groupTicketsBy(tickets, "product"),
-      byCompany: groupTicketsBy(tickets, "company"),
-      byCluster,
+    const body = await cachedSolutionData(`groups:${env}`, async () => {
+      const tickets = await buildSolutionAgentTickets(env)
+      const byClusterRaw = groupTicketsBy(tickets, "clusterId")
+      const byCluster = await enrichClusterGroups(
+        byClusterRaw,
+        tickets.map((t) => t.reference),
+      )
+      return {
+        totals: { tickets: tickets.length, runs: tickets.reduce((sum, t) => sum + t.runs, 0) },
+        lookbackMonths: SOLUTION_LOOKBACK_MONTHS,
+        byCategory: groupTicketsBy(tickets, "category"),
+        byProduct: groupTicketsBy(tickets, "product"),
+        byCompany: groupTicketsBy(tickets, "company"),
+        byCluster,
+      }
     })
+    res.json(body)
   } catch (e) {
     console.error("[solution-agent] groups query failed:", e.message)
     res.status(e.status ?? 502).json({ error: e.message })
