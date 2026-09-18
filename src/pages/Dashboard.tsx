@@ -43,6 +43,7 @@ import Modal from '@intility/bifrost-react/Modal'
 import Dropdown from '@intility/bifrost-react/Dropdown'
 import Input from '@intility/bifrost-react/Input'
 import Pagination from '@intility/bifrost-react/Pagination'
+import DatePicker from '@intility/bifrost-react-datepicker'
 import {
   DEFAULT_ENVIRONMENT,
   ENVIRONMENTS,
@@ -126,6 +127,7 @@ const TIME_PRESETS: TimeRangePreset[] = [
   { label: 'Last hour', minutesBack: 60 },
   { label: 'Last 24 hours', minutesBack: 60 * 24 },
   { label: 'Last 7 days', minutesBack: 60 * 24 * 7 },
+  { label: 'Last 30 days', minutesBack: 60 * 24 * 30 },
 ]
 
 function presetRange(minutesBack: number): TimeRange {
@@ -136,16 +138,6 @@ function presetRange(minutesBack: number): TimeRange {
 
 const DEFAULT_TIME_RANGE = presetRange(60 * 24 * 7)
 
-function toLocalInputValue(iso: string): string {
-  const d = new Date(iso)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-function fromLocalInputValue(value: string): string {
-  return new Date(value).toISOString()
-}
-
 const rangeFormatter = new Intl.DateTimeFormat('en-US', { dateStyle: 'short', timeStyle: 'short' })
 
 function formatRangeLabel(range: TimeRange, activePresetLabel: string | null): string {
@@ -155,23 +147,20 @@ function formatRangeLabel(range: TimeRange, activePresetLabel: string | null): s
 
 function TimeRangePicker({ value, onChange }: { value: TimeRange; onChange: (range: TimeRange) => void }) {
   const [activePreset, setActivePreset] = useState<string | null>('Last 7 days')
-  const [customFrom, setCustomFrom] = useState(() => toLocalInputValue(value.minTimestamp))
-  const [customTo, setCustomTo] = useState(() => toLocalInputValue(value.maxTimestamp))
+  const [customFrom, setCustomFrom] = useState(() => new Date(value.minTimestamp))
+  const [customTo, setCustomTo] = useState(() => new Date(value.maxTimestamp))
 
   const applyPreset = (preset: TimeRangePreset) => {
     const range = presetRange(preset.minutesBack)
     onChange(range)
     setActivePreset(preset.label)
-    setCustomFrom(toLocalInputValue(range.minTimestamp))
-    setCustomTo(toLocalInputValue(range.maxTimestamp))
+    setCustomFrom(new Date(range.minTimestamp))
+    setCustomTo(new Date(range.maxTimestamp))
   }
 
   const applyCustom = () => {
-    if (!customFrom || !customTo) return
-    const minTimestamp = fromLocalInputValue(customFrom)
-    const maxTimestamp = fromLocalInputValue(customTo)
-    if (new Date(minTimestamp) >= new Date(maxTimestamp)) return
-    onChange({ minTimestamp, maxTimestamp })
+    if (customFrom >= customTo) return
+    onChange({ minTimestamp: customFrom.toISOString(), maxTimestamp: customTo.toISOString() })
     setActivePreset(null)
   }
 
@@ -195,19 +184,21 @@ function TimeRangePicker({ value, onChange }: { value: TimeRange; onChange: (ran
           <hr />
           <Grid gap={8} style={{ marginTop: 12 }}>
             <small className="bfc-base-2">Custom range</small>
-            <Input
+            <DatePicker
               label="From"
-              type="datetime-local"
+              showTimeSelect
               small
-              value={customFrom}
-              onChange={(e) => setCustomFrom(e.target.value)}
+              selected={customFrom}
+              maxDate={customTo}
+              onChange={(date) => date && setCustomFrom(date)}
             />
-            <Input
+            <DatePicker
               label="To"
-              type="datetime-local"
+              showTimeSelect
               small
-              value={customTo}
-              onChange={(e) => setCustomTo(e.target.value)}
+              selected={customTo}
+              minDate={customFrom}
+              onChange={(date) => date && setCustomTo(date)}
             />
             <Button small onClick={applyCustom}>
               Apply
