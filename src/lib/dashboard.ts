@@ -371,6 +371,7 @@ export interface SolutionGroupSummary {
 export interface SolutionAgentGroups {
   totals: { tickets: number; runs: number }
   lookbackMonths: number
+  dailyUsage: { day: string; count: number }[]
   byCategory: SolutionGroupSummary[]
   byProduct: SolutionGroupSummary[]
   byCompany: SolutionGroupSummary[]

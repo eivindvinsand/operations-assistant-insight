@@ -433,6 +433,7 @@ function SolutionAgentGroupsPage() {
   }, [])
 
   const activeItems = groups ? groupsForDimension(groups, tab) : []
+  const dailyUsageData = groups ? pivotDaily(groups.dailyUsage, () => 'count') : []
 
   return (
     <div className="bf-page-padding">
@@ -480,6 +481,22 @@ function SolutionAgentGroupsPage() {
             <Tile label="Saker med løsningsforslag" icon={faTicket} value={compactFormatter.format(groups.totals.tickets)} />
             <Tile label="Kjøringer totalt" icon={faArrowsRotate} value={compactFormatter.format(groups.totals.runs)} />
           </Grid>
+
+          <SectionBox title="Kjøringer per dag">
+            {dailyUsageData.length === 0 ? (
+              <Message state="neutral" noIcon>Ingen kjøringer registrert.</Message>
+            ) : (
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={dailyUsageData} margin={{ left: -10 }}>
+                  <CartesianGrid strokeDasharray="5 5" vertical={false} stroke="var(--bfc-base-c-dimmed)" />
+                  <XAxis axisLine={false} tickLine={false} dataKey="label" tick={{ fill: 'var(--bfc-base-c-2)' }} dy={8} />
+                  <YAxis axisLine={false} tickLine={false} allowDecimals={false} tick={{ fill: 'var(--bfc-base-c-2)' }} />
+                  <Tooltip contentStyle={tooltipContentStyle} itemStyle={tooltipItemStyle} labelStyle={tooltipLabelStyle} />
+                  <Line type="monotone" dataKey="count" name="Kjøringer" stroke="var(--bfc-brand)" strokeWidth={2} dot={{ r: 4 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </SectionBox>
 
           <SectionBox title="Bruk per gruppe">
             <Inline style={{ marginBottom: 16, justifyContent: 'flex-end' }}>

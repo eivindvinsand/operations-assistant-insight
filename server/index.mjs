@@ -1571,10 +1571,24 @@ app.get("/api/day-log", async (req, res) => {
   }
 })
 
+/** Total solution_agent_finished runs per day, across every ticket - unlike the per-group detail's
+ * dailyUsage query, this has no reference_number filter, so the whole lookback window fits in one
+ * query (one row per day, well under Logfire's 1000-row cap even at SOLUTION_LOOKBACK_MONTHS). */
+async function fetchDailyRunCounts(env) {
+  const result = await logfireQuery(
+    `SELECT date_trunc('day', start_timestamp) as day, count(*) as n FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' GROUP BY 1 ORDER BY 1`,
+    SOLUTION_ALL_TIME_RANGE,
+  )
+  return result.data.map((row) => ({ day: row.day, count: Number(row.n ?? 0) }))
+}
+
 async function buildSolutionAgentGroups(env, options) {
   // A forced refresh has to reach the ticket rollup too, or it would just re-derive the same
   // groups from the cached extract.
-  const tickets = await buildSolutionAgentTickets(env, options)
+  const [tickets, dailyUsage] = await Promise.all([
+    buildSolutionAgentTickets(env, options),
+    fetchDailyRunCounts(env),
+  ])
   const byClusterRaw = groupTicketsBy(tickets, "clusterId")
   const byCluster = await enrichClusterGroups(
     byClusterRaw,
@@ -1583,6 +1597,7 @@ async function buildSolutionAgentGroups(env, options) {
   return {
     totals: { tickets: tickets.length, runs: tickets.reduce((sum, t) => sum + t.runs, 0) },
     lookbackMonths: SOLUTION_LOOKBACK_MONTHS,
+    dailyUsage,
     byCategory: groupTicketsBy(tickets, "category"),
     byProduct: groupTicketsBy(tickets, "product"),
     byCompany: groupTicketsBy(tickets, "company"),
