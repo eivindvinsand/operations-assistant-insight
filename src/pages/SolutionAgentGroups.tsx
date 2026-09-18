@@ -336,10 +336,12 @@ function SolutionAgentGroupsPage() {
     Partial<Record<SolutionGroupDimension, Record<string, GroupConfidence>>>
   >({})
   const [confidenceLoadingDimension, setConfidenceLoadingDimension] = useState<SolutionGroupDimension | null>(null)
+  const [confidenceError, setConfidenceError] = useState<string | null>(null)
   const [elapsedSec, setElapsedSec] = useState(0)
   // The rollup is built in the background and polled for, so a load spans many requests — this
   // cancels the whole poll loop when the environment changes or the page goes away.
   const loadAbort = useRef<AbortController | null>(null)
+  const detailAbort = useRef<AbortController | null>(null)
 
   const load = useCallback(
     (refresh = false) => {
@@ -378,9 +380,15 @@ function SolutionAgentGroupsPage() {
     if (!groups || confidenceByDimension[tab]) return
     const controller = new AbortController()
     setConfidenceLoadingDimension(tab)
+    setConfidenceError(null)
     fetchSolutionGroupConfidence(tab, environment, { signal: controller.signal })
       .then((data) => setConfidenceByDimension((prev) => ({ ...prev, [tab]: data })))
-      .catch(() => {})
+      .catch((e: Error) => {
+        // Confidence is a side column, so a failure here doesn't take the table down with it —
+        // but it shouldn't leave every row showing a silent "–" either.
+        if (controller.signal.aborted) return
+        setConfidenceError(e.message)
+      })
       .finally(() => {
         if (!controller.signal.aborted) {
           setConfidenceLoadingDimension((current) => (current === tab ? null : current))
@@ -391,15 +399,29 @@ function SolutionAgentGroupsPage() {
 
   const openDetail = useCallback(
     (dimension: SolutionGroupDimension, value: string, label: string) => {
+      // The detail is polled for as well, so opening another group (or closing the modal) has to
+      // cancel the poll loop the previous one left running.
+      detailAbort.current?.abort()
+      const controller = new AbortController()
+      detailAbort.current = controller
       setDetailModal({ dimension, value, label, detail: null, loading: true, error: null })
-      fetchSolutionGroupDetail(dimension, value, environment)
-        .then((detail) => setDetailModal({ dimension, value, label, detail, loading: false, error: null }))
-        .catch((e: Error) =>
-          setDetailModal({ dimension, value, label, detail: null, loading: false, error: e.message }),
-        )
+      fetchSolutionGroupDetail(dimension, value, environment, { signal: controller.signal })
+        .then((detail) => {
+          if (controller.signal.aborted) return
+          setDetailModal({ dimension, value, label, detail, loading: false, error: null })
+        })
+        .catch((e: Error) => {
+          if (controller.signal.aborted) return
+          setDetailModal({ dimension, value, label, detail: null, loading: false, error: e.message })
+        })
     },
     [environment],
   )
+
+  const closeDetail = useCallback(() => {
+    detailAbort.current?.abort()
+    setDetailModal(null)
+  }, [])
 
   const activeItems = groups ? groupsForDimension(groups, tab) : []
 
@@ -460,6 +482,11 @@ function SolutionAgentGroupsPage() {
                 ))}
               </Button.Group>
             </Inline>
+            {confidenceError && (
+              <Message state="warning" noIcon style={{ marginBottom: 16 }}>
+                Konfidenskolonnene kunne ikke hentes: {confidenceError}
+              </Message>
+            )}
             {activeItems.length === 0 ? (
               <Message state="neutral" noIcon>Ingen saker registrert.</Message>
             ) : (
@@ -475,7 +502,7 @@ function SolutionAgentGroupsPage() {
         </Grid>
       )}
 
-      <GroupDetailModal state={detailModal} onClose={() => setDetailModal(null)} />
+      <GroupDetailModal state={detailModal} onClose={closeDetail} />
     </div>
   )
 }

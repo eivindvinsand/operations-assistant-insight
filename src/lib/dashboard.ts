@@ -418,6 +418,10 @@ export async function fetchSolutionGroupDetail(
   dimension: SolutionGroupDimension,
   value: string,
   env: Environment,
+  options?: TaskFetchOptions,
 ): Promise<SolutionGroupDetail> {
-  return fetchJson(`/api/solution-agent/groups/${dimension}/detail?value=${encodeURIComponent(value)}&env=${env}`)
+  return fetchTask(
+    `/api/solution-agent/groups/${dimension}/detail?value=${encodeURIComponent(value)}&env=${env}`,
+    options,
+  )
 }

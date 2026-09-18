@@ -573,6 +573,10 @@ const SOLUTION_DIMENSIONS = { category: "category", product: "product", company:
 // per group in a dimension - with dozens of groups, a 50-run sample per group would multiply into
 // far too many Logfire round trips for a table that's supposed to load in a couple of seconds.
 const SOLUTION_TABLE_SAMPLE_LIMIT = 15
+// One sample query per group, and a dimension can have dozens of groups. Firing them all at once
+// is what a rate limiter sees as a burst, so they go out a few at a time instead - this runs in
+// the background now, so being a little slower costs nothing.
+const CONFIDENCE_QUERY_CONCURRENCY = 6
 // Keeps each fetchStepsByTrace call's response comfortably under Logfire's 1000-row cap, assuming
 // a typical solution-agent trace produces well under 15 spans.
 const STEPS_CHUNK_SIZE = 60
@@ -595,16 +599,14 @@ async function fetchStepsByTraceChunked(traceIds, range) {
  * then one shared chunked pass for all their steps) rather than one query per group per pass. */
 async function computeConfidenceForGroups(env, groupsMap) {
   const entries = [...groupsMap.entries()]
-  const sampleLists = await Promise.all(
-    entries.map(([, groupTickets]) => {
-      const refs = groupTickets.map((t) => t.reference)
-      if (refs.length === 0) return Promise.resolve([])
-      return logfireQuery(
-        `SELECT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) ORDER BY start_timestamp DESC LIMIT ${SOLUTION_TABLE_SAMPLE_LIMIT}`,
-        SOLUTION_ALL_TIME_RANGE,
-      ).then((r) => r.data.map((row) => row.trace_id).filter((id) => TRACE_ID_RE.test(id)))
-    }),
-  )
+  const sampleLists = await mapWithConcurrency(entries, CONFIDENCE_QUERY_CONCURRENCY, ([, groupTickets]) => {
+    const refs = groupTickets.map((t) => t.reference)
+    if (refs.length === 0) return Promise.resolve([])
+    return logfireQuery(
+      `SELECT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) ORDER BY start_timestamp DESC LIMIT ${SOLUTION_TABLE_SAMPLE_LIMIT}`,
+      SOLUTION_ALL_TIME_RANGE,
+    ).then((r) => r.data.map((row) => row.trace_id).filter((id) => TRACE_ID_RE.test(id)))
+  })
 
   const stepsByTrace = await fetchStepsByTraceChunked(sampleLists.flat(), SOLUTION_ALL_TIME_RANGE)
 
@@ -1623,107 +1625,113 @@ app.get("/api/solution-agent/groups/:dimension/confidence", (req, res) => {
 // "Intility Support/Team Identity & Cloud App") can contain slashes - encoded into a path segment
 // as %2F, some proxies normalize that back to a literal "/" before it reaches Express, splitting
 // it into extra path segments that miss this route entirely (falling through to the SPA's HTML).
-app.get("/api/solution-agent/groups/:dimension/detail", async (req, res) => {
-  try {
-    const dimension = req.params.dimension
-    const field = SOLUTION_DIMENSIONS[dimension]
-    if (!field) {
-      return res.status(400).json({ error: "invalid dimension" })
+/** Everything the group detail modal shows, for one group of one dimension. Like the table's
+ * rollup this sits on top of the (possibly still cold) ticket extract, so it runs as a background
+ * task too rather than holding the modal's request open - see solutionTask. */
+async function buildSolutionGroupDetail(env, field, value) {
+  const tickets = await buildSolutionAgentTickets(env)
+  const groupTickets = tickets.filter((t) => String(t[field] || UNKNOWN_GROUP) === value)
+  if (groupTickets.length === 0) {
+    return {
+      ticketCount: 0,
+      runCount: 0,
+      avgDurationSec: 0,
+      sampledRuns: 0,
+      dailyUsage: [],
+      confidence: [],
+      sources: [],
+      sourceTypes: [],
+      tools: [],
     }
-    const value = String(req.query.value ?? "")
-    const env = resolveEnv(req)
-
-    const tickets = await buildSolutionAgentTickets(env)
-    const groupTickets = tickets.filter((t) => String(t[field] || UNKNOWN_GROUP) === value)
-    if (groupTickets.length === 0) {
-      return res.json({
-        ticketCount: 0,
-        runCount: 0,
-        avgDurationSec: 0,
-        sampledRuns: 0,
-        dailyUsage: [],
-        confidence: [],
-        sources: [],
-        sourceTypes: [],
-        tools: [],
-      })
-    }
-
-    const refs = groupTickets.map((t) => t.reference)
-    const runCount = groupTickets.reduce((sum, t) => sum + t.runs, 0)
-    const avgDurationSec =
-      runCount > 0 ? groupTickets.reduce((sum, t) => sum + t.avgDurationSec * t.runs, 0) / runCount : 0
-
-    const [dailyUsageResult, sampleResult] = await Promise.all([
-      logfireQuery(
-        `SELECT date_trunc('day', start_timestamp) as day, count(*) as n FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) GROUP BY 1 ORDER BY 1`,
-        SOLUTION_ALL_TIME_RANGE,
-      ),
-      logfireQuery(
-        `SELECT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) ORDER BY start_timestamp DESC LIMIT ${SOLUTION_SAMPLE_RUN_LIMIT}`,
-        SOLUTION_ALL_TIME_RANGE,
-      ),
-    ])
-
-    const sampleTraceIds = sampleResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
-    const { stepsByTrace } = await fetchStepsByTrace(sampleTraceIds, SOLUTION_ALL_TIME_RANGE)
-
-    const confidenceCounts = { high: 0, medium: 0, low: 0, unknown: 0 }
-    const sourceCounts = new Map()
-    const sourceTypeCounts = new Map()
-    const toolCounts = new Map()
-
-    for (const traceId of sampleTraceIds) {
-      const steps = stepsByTrace.get(traceId) ?? []
-      // Same "any step with output, not just the last one" rule as hasNoAnswer elsewhere — a
-      // trailing empty turn must not hide an earlier real answer's confidence/sources/tools.
-      const outputSteps = steps.filter((s) => (s.type === "agent" || s.type === "chat") && s.output)
-      const solution = outputSteps.length > 0 ? outputSteps[outputSteps.length - 1].output : null
-
-      const confidence = parseConfidence(solution)
-      confidenceCounts[confidence ?? "unknown"] += 1
-
-      for (const source of parseSources(solution)) {
-        const key = source.url || source.title
-        const existing = sourceCounts.get(key) ?? { title: source.title, url: source.url, count: 0 }
-        existing.count += 1
-        sourceCounts.set(key, existing)
-
-        const type = classifySourceType(source.url)
-        sourceTypeCounts.set(type, (sourceTypeCounts.get(type) ?? 0) + 1)
-      }
-
-      for (const step of steps) {
-        if (step.type !== "tool") continue
-        toolCounts.set(step.label, (toolCounts.get(step.label) ?? 0) + 1)
-      }
-    }
-
-    res.json({
-      ticketCount: groupTickets.length,
-      runCount,
-      avgDurationSec,
-      sampledRuns: sampleTraceIds.length,
-      dailyUsage: dailyUsageResult.data.map((row) => ({ day: row.day, count: Number(row.n ?? 0) })),
-      confidence: [
-        { level: "high", count: confidenceCounts.high },
-        { level: "medium", count: confidenceCounts.medium },
-        { level: "low", count: confidenceCounts.low },
-        { level: "unknown", count: confidenceCounts.unknown },
-      ],
-      sources: [...sourceCounts.values()].sort((a, b) => b.count - a.count).slice(0, 10),
-      sourceTypes: [...sourceTypeCounts.entries()]
-        .map(([type, count]) => ({ type, count }))
-        .sort((a, b) => b.count - a.count),
-      tools: [...toolCounts.entries()]
-        .map(([tool, count]) => ({ tool, count }))
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 10),
-    })
-  } catch (e) {
-    console.error("[solution-agent] group detail query failed:", e.message)
-    res.status(e.status ?? 502).json({ error: e.message })
   }
+
+  const refs = groupTickets.map((t) => t.reference)
+  const runCount = groupTickets.reduce((sum, t) => sum + t.runs, 0)
+  const avgDurationSec =
+    runCount > 0 ? groupTickets.reduce((sum, t) => sum + t.avgDurationSec * t.runs, 0) / runCount : 0
+
+  const [dailyUsageResult, sampleResult] = await Promise.all([
+    logfireQuery(
+      `SELECT date_trunc('day', start_timestamp) as day, count(*) as n FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) GROUP BY 1 ORDER BY 1`,
+      SOLUTION_ALL_TIME_RANGE,
+    ),
+    logfireQuery(
+      `SELECT trace_id FROM records WHERE span_name = 'solution_agent_finished' AND deployment_environment = '${env}' AND attributes->>'reference_number' IN (${sqlList(refs)}) ORDER BY start_timestamp DESC LIMIT ${SOLUTION_SAMPLE_RUN_LIMIT}`,
+      SOLUTION_ALL_TIME_RANGE,
+    ),
+  ])
+
+  const sampleTraceIds = sampleResult.data.map((r) => r.trace_id).filter((id) => TRACE_ID_RE.test(id))
+  const { stepsByTrace } = await fetchStepsByTrace(sampleTraceIds, SOLUTION_ALL_TIME_RANGE)
+
+  const confidenceCounts = { high: 0, medium: 0, low: 0, unknown: 0 }
+  const sourceCounts = new Map()
+  const sourceTypeCounts = new Map()
+  const toolCounts = new Map()
+
+  for (const traceId of sampleTraceIds) {
+    const steps = stepsByTrace.get(traceId) ?? []
+    // Same "any step with output, not just the last one" rule as hasNoAnswer elsewhere — a
+    // trailing empty turn must not hide an earlier real answer's confidence/sources/tools.
+    const outputSteps = steps.filter((s) => (s.type === "agent" || s.type === "chat") && s.output)
+    const solution = outputSteps.length > 0 ? outputSteps[outputSteps.length - 1].output : null
+
+    const confidence = parseConfidence(solution)
+    confidenceCounts[confidence ?? "unknown"] += 1
+
+    for (const source of parseSources(solution)) {
+      const key = source.url || source.title
+      const existing = sourceCounts.get(key) ?? { title: source.title, url: source.url, count: 0 }
+      existing.count += 1
+      sourceCounts.set(key, existing)
+
+      const type = classifySourceType(source.url)
+      sourceTypeCounts.set(type, (sourceTypeCounts.get(type) ?? 0) + 1)
+    }
+
+    for (const step of steps) {
+      if (step.type !== "tool") continue
+      toolCounts.set(step.label, (toolCounts.get(step.label) ?? 0) + 1)
+    }
+  }
+
+  return {
+    ticketCount: groupTickets.length,
+    runCount,
+    avgDurationSec,
+    sampledRuns: sampleTraceIds.length,
+    dailyUsage: dailyUsageResult.data.map((row) => ({ day: row.day, count: Number(row.n ?? 0) })),
+    confidence: [
+      { level: "high", count: confidenceCounts.high },
+      { level: "medium", count: confidenceCounts.medium },
+      { level: "low", count: confidenceCounts.low },
+      { level: "unknown", count: confidenceCounts.unknown },
+    ],
+    sources: [...sourceCounts.values()].sort((a, b) => b.count - a.count).slice(0, 10),
+    sourceTypes: [...sourceTypeCounts.entries()]
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count),
+    tools: [...toolCounts.entries()]
+      .map(([tool, count]) => ({ tool, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10),
+  }
+}
+
+// Same background-task protocol as the groups table: 200 with data, 202 while it builds, or the
+// build's error. A click must never sit on a cold rollup with the connection held open.
+app.get("/api/solution-agent/groups/:dimension/detail", (req, res) => {
+  const dimension = req.params.dimension
+  const field = SOLUTION_DIMENSIONS[dimension]
+  if (!field) {
+    return res.status(400).json({ error: "invalid dimension" })
+  }
+  const value = String(req.query.value ?? "")
+  const env = resolveEnv(req)
+  const task = solutionTask(`detail:${env}:${dimension}:${value}`, () =>
+    buildSolutionGroupDetail(env, field, value),
+  )
+  respondWithTask(res, task)
 })
 
 app.get("/api/ticket-info", async (req, res) => {
