@@ -235,8 +235,17 @@ function GroupDetailModal({
   const detail = state?.detail
   const dailyUsageData = detail ? pivotDaily(detail.dailyUsage, () => 'count') : []
 
+  // Bifrost's `width` prop only sets --bf-modal-width, which is a max-width, and the dialog
+  // itself is fit-content — so it sat at around 700px however high that cap was. The explicit
+  // width is what makes it fill the cap; Bifrost's own max-width rule keeps it off the edges.
   return (
-    <Modal isOpen={state != null} onRequestClose={onClose} header={state?.label} width={900}>
+    <Modal
+      isOpen={state != null}
+      onRequestClose={onClose}
+      header={state?.label}
+      width="min(1400px, 92vw)"
+      style={{ width: '100%' }}
+    >
       {state?.loading && (
         <Inline align="center" gap={8}>
           <Icon.Spinner size={20} />
@@ -256,7 +265,7 @@ function GroupDetailModal({
             <Tile label="Snitt varighet" icon={faClock} value={formatDuration(detail.avgDurationSec)} />
           </Grid>
 
-          <Grid cols={1} large={2} gap={24}>
+          <Grid cols={1} large={3} gap={24}>
             <SectionBox title="Konfidens">
               <ConfidenceBars confidence={detail.confidence} />
               <small className="bfc-base-2" style={{ display: 'block', marginTop: 12 }}>
