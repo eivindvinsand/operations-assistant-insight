@@ -3,6 +3,15 @@ import sql from "mssql"
 let pool = null
 let connecting = null
 
+// The DWH is reached through a Minato link sidecar listening on localhost. The app scales to
+// zero, and on a cold start this process is usually serving before that sidecar accepts
+// connections - the first connect then fails outright with "Could not connect". Retrying with
+// backoff turns that startup race into a slightly slower first query instead of a failed page.
+const CONNECT_ATTEMPTS = 6
+const CONNECT_RETRY_BASE_MS = 1000
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 /** A pool that has silently died (idle timeout, sidecar restart) doesn't always emit
  * `error` before the next query hits it, so `.connected` is checked on every call rather
  * than trusting a cached reference forever. `connecting` dedupes concurrent (re)connects
@@ -23,7 +32,7 @@ async function getPool() {
     const host = addr.slice(0, lastColon)
     const port = parseInt(addr.slice(lastColon + 1), 10)
 
-    const newPool = new sql.ConnectionPool({
+    const config = {
       server: host,
       port,
       user: process.env.DWH_USER ?? "",
@@ -40,14 +49,25 @@ async function getPool() {
       // two of those loops can be in flight at once - so the pool has to hold more connections
       // than that, or a batch sits waiting on the pool instead of on the server.
       pool: { max: 8, min: 0, idleTimeoutMillis: 30000 },
-    })
-    newPool.on("error", () => {
-      if (pool === newPool) pool = null
-    })
+    }
 
-    await newPool.connect()
-    pool = newPool
-    return pool
+    for (let attempt = 1; ; attempt++) {
+      // A pool whose connect() rejected can't be reused, so each attempt gets a fresh one.
+      const newPool = new sql.ConnectionPool(config)
+      newPool.on("error", () => {
+        if (pool === newPool) pool = null
+      })
+      try {
+        await newPool.connect()
+        pool = newPool
+        return pool
+      } catch (err) {
+        await Promise.resolve(newPool.close()).catch(() => {})
+        if (attempt >= CONNECT_ATTEMPTS) throw err
+        console.warn(`[dwh] connect attempt ${attempt} failed (${err.message}), retrying`)
+        await sleep(CONNECT_RETRY_BASE_MS * 2 ** (attempt - 1))
+      }
+    }
   })()
 
   try {
