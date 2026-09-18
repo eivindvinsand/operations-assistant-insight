@@ -1809,8 +1809,20 @@ app.get("/api/dwh-test", (_req, res) => {
 })
 
 if (isProduction) {
-  app.use(express.static(distDir))
+  // Vite content-hashes everything under assets/, so those files can be cached forever - a new
+  // build simply gets new filenames. index.html keeps a stable URL, though, so it must never be
+  // cached: otherwise a browser keeps serving a stale index.html that points at asset hashes a
+  // later deploy has already deleted, and the only fix is a hard refresh.
+  app.use(
+    express.static(distDir, {
+      index: false,
+      setHeaders: (res, filePath) => {
+        res.set("Cache-Control", path.basename(filePath) === "index.html" ? "no-cache" : "public, max-age=31536000, immutable")
+      },
+    }),
+  )
   app.get(/.*/, (_req, res) => {
+    res.set("Cache-Control", "no-cache")
     res.sendFile(path.join(distDir, "index.html"))
   })
 }
