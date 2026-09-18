@@ -110,13 +110,31 @@ export interface DashboardData {
   dailyNoAnswer: { day: string; total: number; noAnswer: number; percent: number }[]
 }
 
+// The API scales to zero after a while without traffic, so the first request after the tab has
+// sat idle can be dropped outright while the container cold-starts - that shows up as a bare
+// TypeError ("Failed to fetch") with no HTTP status to inspect, and is worth retrying rather than
+// surfacing as "Could not fetch data" (mirrors the retry already done for fetchTask below).
+const JSON_NETWORK_RETRIES = 4
+const JSON_RETRY_DELAY_MS = 2500
+
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: 'no-store' })
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(body.error ?? `Request failed (${res.status})`)
+  let networkFailures = 0
+  for (;;) {
+    let res: Response
+    try {
+      res = await fetch(url, { cache: 'no-store' })
+    } catch (e) {
+      networkFailures += 1
+      if (networkFailures > JSON_NETWORK_RETRIES) throw e
+      await delay(JSON_RETRY_DELAY_MS)
+      continue
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }))
+      throw new Error(body.error ?? `Request failed (${res.status})`)
+    }
+    return res.json()
   }
-  return res.json()
 }
 
 /** Endpoints whose data is built by a background task answer 202 while the build runs, and wrap
