@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import {
   faArrowsRotate,
@@ -336,28 +336,57 @@ function SolutionAgentGroupsPage() {
     Partial<Record<SolutionGroupDimension, Record<string, GroupConfidence>>>
   >({})
   const [confidenceLoadingDimension, setConfidenceLoadingDimension] = useState<SolutionGroupDimension | null>(null)
+  const [elapsedSec, setElapsedSec] = useState(0)
+  // The rollup is built in the background and polled for, so a load spans many requests — this
+  // cancels the whole poll loop when the environment changes or the page goes away.
+  const loadAbort = useRef<AbortController | null>(null)
 
-  const load = useCallback(() => {
-    setLoading(true)
-    setError(null)
-    setConfidenceByDimension({})
-    fetchSolutionAgentGroups(environment)
-      .then((data) => setGroups(data))
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [environment])
+  const load = useCallback(
+    (refresh = false) => {
+      loadAbort.current?.abort()
+      const controller = new AbortController()
+      loadAbort.current = controller
+      setLoading(true)
+      setError(null)
+      setConfidenceByDimension({})
+      setElapsedSec(0)
+      fetchSolutionAgentGroups(environment, { signal: controller.signal, refresh })
+        .then((data) => setGroups(data))
+        .catch((e: Error) => {
+          if (controller.signal.aborted) return
+          setError(e.message)
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false)
+        })
+    },
+    [environment],
+  )
 
   useEffect(() => {
     load()
+    return () => loadAbort.current?.abort()
   }, [load])
 
   useEffect(() => {
+    if (!loading) return
+    const timer = setInterval(() => setElapsedSec((s) => s + 1), 1000)
+    return () => clearInterval(timer)
+  }, [loading])
+
+  useEffect(() => {
     if (!groups || confidenceByDimension[tab]) return
+    const controller = new AbortController()
     setConfidenceLoadingDimension(tab)
-    fetchSolutionGroupConfidence(tab, environment)
+    fetchSolutionGroupConfidence(tab, environment, { signal: controller.signal })
       .then((data) => setConfidenceByDimension((prev) => ({ ...prev, [tab]: data })))
       .catch(() => {})
-      .finally(() => setConfidenceLoadingDimension((current) => (current === tab ? null : current)))
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setConfidenceLoadingDimension((current) => (current === tab ? null : current))
+        }
+      })
+    return () => controller.abort()
   }, [groups, tab, environment, confidenceByDimension])
 
   const openDetail = useCallback(
@@ -390,7 +419,7 @@ function SolutionAgentGroupsPage() {
             </Button>
           ))}
         </Button.Group>
-        <Button onClick={load} disabled={loading}>
+        <Button onClick={() => load(true)} disabled={loading}>
           <Icon icon={faArrowsRotate} marginRight />
           Oppdater
         </Button>
@@ -405,7 +434,12 @@ function SolutionAgentGroupsPage() {
       {loading && !groups && (
         <Inline align="center" gap={8}>
           <Icon.Spinner size={24} />
-          <span>Laster data …</span>
+          <span>
+            Laster data fra datavarehuset …{elapsedSec >= 10 && ` (${elapsedSec} s)`}
+            <small className="bfc-base-2" style={{ display: 'block' }}>
+              Første innlasting etter en pause bygger hele oppslaget på nytt og kan ta et par minutter.
+            </small>
+          </span>
         </Inline>
       )}
 

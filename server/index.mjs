@@ -305,24 +305,105 @@ const SOLUTION_SAMPLE_RUN_LIMIT = 50
 // Unlike the rest of this dashboard (live telemetry, deliberately never cached - see the
 // Cache-Control middleware above), the solution-agent view is a DWH-backed rollup: a slow-changing
 // historical extract, expensive enough to aggregate (chunked DWH batches plus a 24-month Logfire
-// scan) that it can outrun even the driver's request timeout on a cold cache. Short-lived caching
-// means a page reload doesn't re-run the whole aggregation from scratch every time.
-const SOLUTION_CACHE_TTL_MS = 15 * 60 * 1000
-const solutionCache = new Map()
+// scan) that a cold build takes minutes, not seconds.
+//
+// Holding the browser's request open for that long is what made this page fail so often: nothing
+// between the browser and this process is willing to wait minutes for a response, so the
+// connection gets cut and fetch() rejects with a bare "Failed to fetch" - no status, no message
+// from us. Knative's concurrency-based autoscaler made it worse, since every request hanging on a
+// cold build counts as load and can start another replica, each with its own empty cache
+// re-running the same aggregation.
+//
+// So the rollup is a background task rather than a request: the endpoints below never await a
+// cold build. They start it, answer 202 straight away, and the client polls until it's ready.
+const SOLUTION_FRESH_MS = 30 * 60 * 1000
+// How long a failed build keeps being reported to callers before another attempt is started -
+// without it, a polling client would retry a broken DWH in a tight loop.
+const SOLUTION_RETRY_COOLDOWN_MS = 30 * 1000
+const solutionTasks = new Map()
 
-/** Runs `compute` once per `key` within SOLUTION_CACHE_TTL_MS, sharing the same in-flight promise
- * across concurrent callers so a cold cache doesn't trigger the same expensive query twice. A
- * rejected compute is evicted immediately so the next call retries instead of caching the failure. */
-function cachedSolutionData(key, compute) {
+/** The background-task cache behind the solution-agent endpoints. Returns the task's state
+ * synchronously (it never awaits), starting a build when there is no fresh value and nothing
+ * already running. A stale value keeps being served while its refresh runs behind it. */
+function solutionTask(key, compute, { forceRefresh = false } = {}) {
+  let task = solutionTasks.get(key)
+  if (!task) {
+    task = { value: null, computedAt: 0, startedAt: 0, error: null, failedAt: 0, promise: null }
+    solutionTasks.set(key, task)
+  }
   const now = Date.now()
-  const entry = solutionCache.get(key)
-  if (entry && entry.expiresAt > now) return entry.promise
-  const promise = compute().catch((err) => {
-    solutionCache.delete(key)
-    throw err
+  const fresh = task.value != null && now - task.computedAt < SOLUTION_FRESH_MS
+  const cooling = task.error != null && now - task.failedAt < SOLUTION_RETRY_COOLDOWN_MS
+  if (!task.promise && !cooling && (forceRefresh || !fresh)) {
+    task.startedAt = now
+    // An explicit refresh must not keep answering with the rollup it was asked to replace, and a
+    // previous failure must not be reported while its retry is still running.
+    if (forceRefresh) task.value = null
+    task.error = null
+    task.promise = compute()
+      .then((value) => {
+        task.value = value
+        task.computedAt = Date.now()
+        task.error = null
+      })
+      .catch((err) => {
+        task.error = err
+        task.failedAt = Date.now()
+        console.error(`[solution-agent] background build of ${key} failed:`, err.message)
+      })
+      .finally(() => {
+        task.promise = null
+      })
+  }
+  return task
+}
+
+/** Answers a request from its background task: the value when there is one (even a stale one
+ * being refreshed), the last error when the build failed, and 202 "pending" while one is running.
+ * The payload is always under `data` so these three shapes stay distinguishable. */
+function respondWithTask(res, task) {
+  if (task.value != null) {
+    return res.json({
+      status: "ready",
+      updatedAt: new Date(task.computedAt).toISOString(),
+      refreshing: task.promise != null,
+      data: task.value,
+    })
+  }
+  if (task.error) {
+    return res.status(task.error.status ?? 502).json({ status: "error", error: task.error.message })
+  }
+  return res.status(202).json({ status: "pending", startedAt: new Date(task.startedAt).toISOString() })
+}
+
+/** Awaits a task's value, for the callers that are themselves running inside a background build
+ * (or on top of an already-built rollup) and so can block safely. */
+async function awaitSolutionTask(key, compute, options) {
+  const task = solutionTask(key, compute, options)
+  if (task.promise) await task.promise
+  if (task.value != null) return task.value
+  throw task.error ?? new Error(`solution-agent build of ${key} produced no data`)
+}
+
+/** Runs `fn` over `items` with at most `limit` of them in flight. The DWH chunk loops below used
+ * to await one batch at a time, which is where most of a cold build's wall clock went. */
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++
+      results[index] = await fn(items[index])
+    }
   })
-  solutionCache.set(key, { expiresAt: now + SOLUTION_CACHE_TTL_MS, promise })
-  return promise
+  await Promise.all(workers)
+  return results
+}
+
+function chunk(items, size) {
+  const chunks = []
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size))
+  return chunks
 }
 
 function monthlyLookbackRanges(months) {
@@ -368,17 +449,22 @@ async function fetchAllSolutionRunsByTicket(env) {
 }
 
 const DWH_BATCH_SIZE = 500
+// Batches run a few at a time rather than one after another; kept below the connection pool's max
+// so two of these loops running side by side (ticket meta + cluster membership) still queue
+// rather than starve each other.
+const DWH_BATCH_CONCURRENCY = 3
 
 /** Looks up category/product/company/closed-time for a batch of reference numbers, chunked to
  * stay well under SQL Server's ~2100 parameter limit per query. */
 async function fetchTicketMetaByReference(referenceNumbers) {
   const metaByRef = new Map()
-  for (let i = 0; i < referenceNumbers.length; i += DWH_BATCH_SIZE) {
-    const batch = referenceNumbers.slice(i, i + DWH_BATCH_SIZE)
-    const rows = await dwhQuery(
+  const batches = await mapWithConcurrency(chunk(referenceNumbers, DWH_BATCH_SIZE), DWH_BATCH_CONCURRENCY, (batch) =>
+    dwhQuery(
       `SELECT reference_number, category_name, category_fullname, implementation_name, company_name, ticket_time_to_closed_sec FROM customer_inquiries.tickets_last_five_years WHERE reference_number IN (${batch.map((_, j) => `@ref${j}`).join(",")})`,
       batch.map((ref, j) => ({ name: `ref${j}`, type: sqlTypes.NVarChar, value: ref })),
-    )
+    ),
+  )
+  for (const rows of batches) {
     for (const row of rows) {
       metaByRef.set(row.reference_number, {
         categoryName: row.category_name ?? null,
@@ -396,12 +482,13 @@ async function fetchTicketMetaByReference(referenceNumbers) {
  * chunked the same way as fetchTicketMetaByReference. Tickets outside any cluster are absent. */
 async function fetchClusterIdByReference(referenceNumbers) {
   const clusterByRef = new Map()
-  for (let i = 0; i < referenceNumbers.length; i += DWH_BATCH_SIZE) {
-    const batch = referenceNumbers.slice(i, i + DWH_BATCH_SIZE)
-    const rows = await dwhQuery(
+  const batches = await mapWithConcurrency(chunk(referenceNumbers, DWH_BATCH_SIZE), DWH_BATCH_CONCURRENCY, (batch) =>
+    dwhQuery(
       `SELECT reference_number, cluster_id FROM support.ticket_cluster_members WHERE reference_number COLLATE DATABASE_DEFAULT IN (${batch.map((_, j) => `@ref${j}`).join(",")})`,
       batch.map((ref, j) => ({ name: `ref${j}`, type: sqlTypes.NVarChar, value: ref })),
-    )
+    ),
+  )
+  for (const rows of batches) {
     for (const row of rows) clusterByRef.set(row.reference_number, row.cluster_id)
   }
   return clusterByRef
@@ -409,8 +496,8 @@ async function fetchClusterIdByReference(referenceNumbers) {
 
 /** One row per ticket the solution agent has ever run against, with its DWH category/product/
  * company/cluster (falling back to "Ukjent" when the ticket isn't found in the DWH extract). */
-function buildSolutionAgentTickets(env) {
-  return cachedSolutionData(`tickets:${env}`, () => buildSolutionAgentTicketsUncached(env))
+function buildSolutionAgentTickets(env, options) {
+  return awaitSolutionTask(`tickets:${env}`, () => buildSolutionAgentTicketsUncached(env), options)
 }
 
 async function buildSolutionAgentTicketsUncached(env) {
@@ -547,15 +634,16 @@ async function computeConfidenceForGroups(env, groupsMap) {
  * ticket_cluster_hierarchy), chunked like the reference-number lookups above. */
 async function fetchClusterNames(clusterIds) {
   const namesByCluster = new Map()
-  for (let i = 0; i < clusterIds.length; i += DWH_BATCH_SIZE) {
-    const batch = clusterIds.slice(i, i + DWH_BATCH_SIZE)
-    const rows = await dwhQuery(
+  const batches = await mapWithConcurrency(chunk(clusterIds, DWH_BATCH_SIZE), DWH_BATCH_CONCURRENCY, (batch) =>
+    dwhQuery(
       `SELECT cg.cluster_id, cg.label AS cluster_name, ch.hierarchy_name
        FROM support.ticket_cluster_groups cg
        LEFT JOIN support.ticket_cluster_hierarchy ch ON ch.cluster_id = cg.cluster_id
        WHERE cg.cluster_id IN (${batch.map((_, j) => `@c${j}`).join(",")})`,
       batch.map((id, j) => ({ name: `c${j}`, type: sqlTypes.Int, value: id })),
-    )
+    ),
+  )
+  for (const rows of batches) {
     for (const row of rows) {
       namesByCluster.set(row.cluster_id, {
         clusterName: row.cluster_name ?? null,
@@ -577,9 +665,8 @@ async function fetchOtherClusterStats(clusterIds, aiReferenceNumbers) {
   const validRefs = aiReferenceNumbers.filter((r) => /^\d+$/.test(r))
   const excludeList = validRefs.length > 0 ? sqlList(validRefs) : "''"
   const statsByCluster = new Map()
-  for (let i = 0; i < clusterIds.length; i += DWH_BATCH_SIZE) {
-    const batch = clusterIds.slice(i, i + DWH_BATCH_SIZE)
-    const rows = await dwhQuery(
+  const batches = await mapWithConcurrency(chunk(clusterIds, DWH_BATCH_SIZE), DWH_BATCH_CONCURRENCY, (batch) =>
+    dwhQuery(
       `WITH other_tickets AS (
         SELECT DISTINCT m.reference_number, m.cluster_id
         FROM support.ticket_cluster_members m
@@ -605,7 +692,9 @@ async function fetchOtherClusterStats(clusterIds, aiReferenceNumbers) {
       LEFT JOIN median_values mv ON mv.cluster_id = td.cluster_id
       GROUP BY td.cluster_id`,
       batch.map((id, j) => ({ name: `c${j}`, type: sqlTypes.Int, value: id })),
-    )
+    ),
+  )
+  for (const rows of batches) {
     for (const row of rows) {
       statsByCluster.set(row.cluster_id, {
         otherTicketCount: Number(row.other_ticket_count ?? 0),
@@ -1480,49 +1569,54 @@ app.get("/api/day-log", async (req, res) => {
   }
 })
 
-app.get("/api/solution-agent/groups", async (req, res) => {
-  try {
-    const env = resolveEnv(req)
-    const body = await cachedSolutionData(`groups:${env}`, async () => {
-      const tickets = await buildSolutionAgentTickets(env)
-      const byClusterRaw = groupTicketsBy(tickets, "clusterId")
-      const byCluster = await enrichClusterGroups(
-        byClusterRaw,
-        tickets.map((t) => t.reference),
-      )
-      return {
-        totals: { tickets: tickets.length, runs: tickets.reduce((sum, t) => sum + t.runs, 0) },
-        lookbackMonths: SOLUTION_LOOKBACK_MONTHS,
-        byCategory: groupTicketsBy(tickets, "category"),
-        byProduct: groupTicketsBy(tickets, "product"),
-        byCompany: groupTicketsBy(tickets, "company"),
-        byCluster,
-      }
-    })
-    res.json(body)
-  } catch (e) {
-    console.error("[solution-agent] groups query failed:", e.message)
-    res.status(e.status ?? 502).json({ error: e.message })
+async function buildSolutionAgentGroups(env, options) {
+  // A forced refresh has to reach the ticket rollup too, or it would just re-derive the same
+  // groups from the cached extract.
+  const tickets = await buildSolutionAgentTickets(env, options)
+  const byClusterRaw = groupTicketsBy(tickets, "clusterId")
+  const byCluster = await enrichClusterGroups(
+    byClusterRaw,
+    tickets.map((t) => t.reference),
+  )
+  return {
+    totals: { tickets: tickets.length, runs: tickets.reduce((sum, t) => sum + t.runs, 0) },
+    lookbackMonths: SOLUTION_LOOKBACK_MONTHS,
+    byCategory: groupTicketsBy(tickets, "category"),
+    byProduct: groupTicketsBy(tickets, "product"),
+    byCompany: groupTicketsBy(tickets, "company"),
+    byCluster,
   }
+}
+
+// Answers from the background task (see solutionTask): 200 with data, 202 while a build runs, or
+// the build's error. `?refresh=1` starts a rebuild even when the cached rollup is still fresh.
+app.get("/api/solution-agent/groups", (req, res) => {
+  const env = resolveEnv(req)
+  const forceRefresh = req.query.refresh === "1"
+  const task = solutionTask(`groups:${env}`, () => buildSolutionAgentGroups(env, { forceRefresh }), {
+    forceRefresh,
+  })
+  respondWithTask(res, task)
 })
 
 // Registered before the generic /:dimension/:value route below so a literal ":value" of
 // "confidence" doesn't get swallowed by that route instead (Express matches by declaration order).
-app.get("/api/solution-agent/groups/:dimension/confidence", async (req, res) => {
-  try {
-    const dimension = req.params.dimension
-    const field = SOLUTION_DIMENSIONS[dimension]
-    if (!field) {
-      return res.status(400).json({ error: "invalid dimension" })
-    }
-    const env = resolveEnv(req)
-    const tickets = await buildSolutionAgentTickets(env)
-    const confidenceByGroup = await computeConfidenceForGroups(env, groupTicketsRaw(tickets, field))
-    res.json(Object.fromEntries(confidenceByGroup))
-  } catch (e) {
-    console.error("[solution-agent] group confidence query failed:", e.message)
-    res.status(e.status ?? 502).json({ error: e.message })
+app.get("/api/solution-agent/groups/:dimension/confidence", (req, res) => {
+  const dimension = req.params.dimension
+  const field = SOLUTION_DIMENSIONS[dimension]
+  if (!field) {
+    return res.status(400).json({ error: "invalid dimension" })
   }
+  const env = resolveEnv(req)
+  const task = solutionTask(
+    `confidence:${dimension}:${env}`,
+    async () => {
+      const tickets = await buildSolutionAgentTickets(env)
+      return Object.fromEntries(await computeConfidenceForGroups(env, groupTicketsRaw(tickets, field)))
+    },
+    { forceRefresh: req.query.refresh === "1" },
+  )
+  respondWithTask(res, task)
 })
 
 // "value" is a query param, not a path segment, because group keys (e.g. a category name like
@@ -1702,4 +1796,10 @@ const port = isProduction ? 8080 : 8787
 const host = isProduction ? "0.0.0.0" : "127.0.0.1"
 app.listen(port, host, () => {
   console.log(`API server listening on http://${host}:${port} (${isProduction ? "production" : "dev"})`)
+  // The app scales to zero, so a cold start is the common case, not the exception. Start the
+  // default environment's rollup here rather than waiting for the first visitor to trigger it:
+  // by the time someone opens the page, the build is usually already done or well under way.
+  if (process.env.LOGFIRE_API_KEY) {
+    solutionTask(`groups:${DEFAULT_ENVIRONMENT}`, () => buildSolutionAgentGroups(DEFAULT_ENVIRONMENT))
+  }
 })

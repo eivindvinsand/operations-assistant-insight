@@ -36,7 +36,10 @@ async function getPool() {
       // second. There's no per-query override in this driver, so this is the floor for all of
       // them.
       requestTimeout: 60000,
-      pool: { max: 5, min: 0, idleTimeoutMillis: 30000 },
+      // The solution-agent rollup runs its batches a few at a time (DWH_BATCH_CONCURRENCY), and
+      // two of those loops can be in flight at once - so the pool has to hold more connections
+      // than that, or a batch sits waiting on the pool instead of on the server.
+      pool: { max: 8, min: 0, idleTimeoutMillis: 30000 },
     })
     newPool.on("error", () => {
       if (pool === newPool) pool = null

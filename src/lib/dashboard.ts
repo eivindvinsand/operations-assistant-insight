@@ -119,6 +119,86 @@ async function fetchJson<T>(url: string): Promise<T> {
   return res.json()
 }
 
+/** Endpoints whose data is built by a background task answer 202 while the build runs, and wrap
+ * the finished data in `data` — see the solutionTask comment in server/index.mjs. */
+interface TaskEnvelope<T> {
+  status: 'ready' | 'pending' | 'error'
+  data?: T
+  updatedAt?: string
+  refreshing?: boolean
+  error?: string
+}
+
+const TASK_POLL_INTERVAL_MS = 2500
+const TASK_POLL_TIMEOUT_MS = 10 * 60 * 1000
+// The API scales to zero, so the first request after an idle period can be dropped outright while
+// the container starts. Those show up as a bare TypeError ("Failed to fetch") with no status to
+// inspect, and they're worth retrying rather than showing the user.
+const TASK_NETWORK_RETRIES = 4
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason)
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    function onAbort() {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+export interface TaskFetchOptions {
+  signal?: AbortSignal
+  /** Rebuild the data server-side even if the cached rollup is still fresh (the Oppdater button). */
+  refresh?: boolean
+}
+
+/** Fetches a background-task endpoint, polling while it answers 202. Nothing between the browser
+ * and the API is willing to hold a connection open for the minutes a cold DWH rollup takes, so
+ * waiting happens here, in short polls, instead of in one long request. */
+async function fetchTask<T>(url: string, { signal, refresh }: TaskFetchOptions = {}): Promise<T> {
+  const deadline = Date.now() + TASK_POLL_TIMEOUT_MS
+  // Only the first request asks for a rebuild; the polls that follow must not keep restarting it.
+  let pollUrl = refresh ? `${url}&refresh=1` : url
+  let networkFailures = 0
+
+  for (;;) {
+    let res: Response
+    try {
+      res = await fetch(pollUrl, { cache: 'no-store', signal })
+    } catch (e) {
+      if (signal?.aborted) throw e
+      networkFailures += 1
+      if (networkFailures > TASK_NETWORK_RETRIES) {
+        throw new Error('Fikk ikke kontakt med API-et. Prøv igjen om litt.')
+      }
+      await delay(TASK_POLL_INTERVAL_MS, signal)
+      continue
+    }
+    networkFailures = 0
+    pollUrl = url
+
+    if (res.status === 202) {
+      if (Date.now() > deadline) {
+        throw new Error('Tidsavbrudd: datavarehuset brukte for lang tid på å svare.')
+      }
+      await delay(TASK_POLL_INTERVAL_MS, signal)
+      continue
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }))
+      throw new Error(body.error ?? `Request failed (${res.status})`)
+    }
+    const body = (await res.json()) as TaskEnvelope<T>
+    if (body.data === undefined) throw new Error('Tomt svar fra API-et.')
+    return body.data
+  }
+}
+
 export async function fetchDashboard(env: Environment, range: TimeRange): Promise<DashboardData> {
   return fetchJson(`/api/dashboard?env=${env}&${rangeQuery(range)}`)
 }
@@ -297,8 +377,11 @@ export interface SolutionAgentGroups {
   byCluster: SolutionGroupSummary[]
 }
 
-export async function fetchSolutionAgentGroups(env: Environment): Promise<SolutionAgentGroups> {
-  return fetchJson(`/api/solution-agent/groups?env=${env}`)
+export async function fetchSolutionAgentGroups(
+  env: Environment,
+  options?: TaskFetchOptions,
+): Promise<SolutionAgentGroups> {
+  return fetchTask(`/api/solution-agent/groups?env=${env}`, options)
 }
 
 export interface GroupConfidence {
@@ -310,8 +393,9 @@ export interface GroupConfidence {
 export async function fetchSolutionGroupConfidence(
   dimension: SolutionGroupDimension,
   env: Environment,
+  options?: TaskFetchOptions,
 ): Promise<Record<string, GroupConfidence>> {
-  return fetchJson(`/api/solution-agent/groups/${dimension}/confidence?env=${env}`)
+  return fetchTask(`/api/solution-agent/groups/${dimension}/confidence?env=${env}`, options)
 }
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low' | 'unknown'
